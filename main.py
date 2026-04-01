@@ -378,8 +378,7 @@ def _build_menu_cve_counter(config: PipelineConfig, verbose: bool = False):
 
         if verbose and warnings:
             print(
-                f"{Fore.MAGENTA}[VERBOSE]{Style.RESET_ALL} "
-                f"{Fore.YELLOW}Menu CVE count warning for '{key}': {warnings[0]}{Style.RESET_ALL}",
+                f"{Fore.MAGENTA}[VERBOSE]{Style.RESET_ALL} " f"{Fore.YELLOW}Menu CVE count warning for '{key}': {warnings[0]}{Style.RESET_ALL}",
                 file=sys.stderr,
             )
 
@@ -412,8 +411,7 @@ def _build_menu_cve_counter(config: PipelineConfig, verbose: bool = False):
 
         if verbose:
             print(
-                f"{Fore.MAGENTA}[VERBOSE]{Style.RESET_ALL} "
-                f"{Fore.GREEN}Loading menu CVE counts for branch {branch}...{Style.RESET_ALL}",
+                f"{Fore.MAGENTA}[VERBOSE]{Style.RESET_ALL} " f"{Fore.GREEN}Loading menu CVE counts for branch {branch}...{Style.RESET_ALL}",
                 file=sys.stderr,
             )
 
@@ -451,8 +449,7 @@ def _build_menu_cve_counter(config: PipelineConfig, verbose: bool = False):
         _persist_cache()
         if verbose:
             print(
-                f"{Fore.MAGENTA}[VERBOSE]{Style.RESET_ALL} "
-                f"{Fore.GREEN}Completed menu CVE count warm-up for branch {branch}.{Style.RESET_ALL}",
+                f"{Fore.MAGENTA}[VERBOSE]{Style.RESET_ALL} " f"{Fore.GREEN}Completed menu CVE count warm-up for branch {branch}.{Style.RESET_ALL}",
                 file=sys.stderr,
             )
 

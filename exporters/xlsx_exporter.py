@@ -73,11 +73,7 @@ def write_enrichment_xlsx(result: dict[str, Any], output_path: str) -> None:
         references = cve.get("references", []) or []
         affected_versions = cve.get("affected_versions", []) or []
         nvd = cve.get("nvd") or {}
-        commit_confidences = [
-            float(item.get("confidence", 0.0) or 0.0)
-            for item in commits
-            if isinstance(item, dict)
-        ]
+        commit_confidences = [float(item.get("confidence", 0.0) or 0.0) for item in commits if isinstance(item, dict)]
 
         cve_sheet.append(
             [
@@ -102,11 +98,7 @@ def write_enrichment_xlsx(result: dict[str, Any], output_path: str) -> None:
                 _as_joined_lines(nvd.get("cpes", []) if isinstance(nvd, dict) else []),
                 _as_joined_lines(references),
                 _as_joined_lines(affected_versions),
-                _as_joined_lines([
-                    f"{item.get('sha', '')} | {item.get('title', '')}"
-                    for item in commits
-                    if isinstance(item, dict)
-                ]),
+                _as_joined_lines([f"{item.get('sha', '')} | {item.get('title', '')}" for item in commits if isinstance(item, dict)]),
             ]
         )
 
