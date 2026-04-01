@@ -5,6 +5,6 @@ __pycache__/
 # BEGIN slowPush managed block
 cves/**
 !cves/
-!cves/2010/
-!cves/2010/**
+!cves/2011/
+!cves/2011/**
 # END slowPush managed block
