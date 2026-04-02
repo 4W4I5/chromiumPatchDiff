@@ -20,14 +20,7 @@ from colorama import init as colorama_init
 
 from chrome import Chrome
 from clients.http_client import HttpClient
-from config import (
-    CompareComponent,
-    ComparePlatform,
-    PipelineConfig,
-    ReleaseChannel,
-    SourceMode,
-    resolve_component_repo,
-)
+from config import CompareComponent, ComparePlatform, PipelineConfig, ReleaseChannel, SourceMode, resolve_component_repo
 from exporters.html_exporter import write_compare_html
 from pipeline.orchestrator import EnrichmentOrchestrator
 from sources.chromium_source import ChromiumMirrorSource

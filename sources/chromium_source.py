@@ -281,9 +281,7 @@ class ChromiumMirrorSource:
         normalized_keyword = keyword.strip().lower()
 
         if platform != ComparePlatform.ALL:
-            warnings.append(
-                "Platform filtering uses commit-message heuristics for commits and path heuristics for changed files."
-            )
+            warnings.append("Platform filtering uses commit-message heuristics for commits and path heuristics for changed files.")
 
         compare_commits: list[CommitEvidence] = []
         for item in payload.get("commits", []) or []:
@@ -331,8 +329,7 @@ class ChromiumMirrorSource:
 
             if normalized_prefixes:
                 prefix_match = any(
-                    lowered_filename.startswith(prefix.rstrip("/") + "/") or lowered_filename == prefix.rstrip("/")
-                    for prefix in normalized_prefixes
+                    lowered_filename.startswith(prefix.rstrip("/") + "/") or lowered_filename == prefix.rstrip("/") for prefix in normalized_prefixes
                 )
                 if not prefix_match:
                     continue
@@ -429,9 +426,7 @@ class ChromiumMirrorSource:
                 candidate_versions.add(version_match.group(1))
 
         if not candidate_versions and release_channel != ReleaseChannel.STABLE:
-            warnings.append(
-                f"No tags matched release channel '{release_channel.value}' in {normalized_repo}; falling back to stable tag list."
-            )
+            warnings.append(f"No tags matched release channel '{release_channel.value}' in {normalized_repo}; falling back to stable tag list.")
             return self.list_version_tags(
                 repo=normalized_repo,
                 release_channel=ReleaseChannel.STABLE,
