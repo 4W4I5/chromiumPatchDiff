@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 
 def _parse_iso_utc(value: str) -> datetime | None:
@@ -32,6 +34,27 @@ def _days_since(value: str, now_utc: datetime) -> int | str:
 
 def _as_joined_lines(items: list[Any]) -> str:
     return "\n".join(str(item) for item in items if str(item).strip())
+
+
+def _style_header_row(sheet) -> None:
+    header_fill = PatternFill(fill_type="solid", fgColor="1F4E78")
+    header_font = Font(bold=True, color="FFFFFF")
+
+    for cell in sheet[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="left", vertical="center")
+
+
+def _autosize_columns(sheet, max_width: int = 80) -> None:
+    for column_idx, column_cells in enumerate(sheet.columns, start=1):
+        max_len = 0
+        for cell in column_cells:
+            cell_value = "" if cell.value is None else str(cell.value)
+            max_len = max(max_len, len(cell_value))
+
+        desired = min(max_width, max(12, max_len + 2))
+        sheet.column_dimensions[get_column_letter(column_idx)].width = desired
 
 
 def write_enrichment_xlsx(result: dict[str, Any], output_path: str) -> None:
@@ -147,6 +170,76 @@ def write_enrichment_xlsx(result: dict[str, Any], output_path: str) -> None:
         "matched_count",
     ):
         metadata_sheet.append([key, result.get(key, "")])
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(path)
+
+
+def write_compare_xlsx(result: dict[str, Any], output_path: str) -> None:
+    workbook = Workbook()
+
+    metadata_sheet = workbook.active
+    metadata_sheet.title = "Compare Metadata"
+    metadata_sheet.append(["key", "value"])
+    for key in (
+        "task",
+        "compare_repo",
+        "compare_base_version",
+        "compare_head_version",
+        "compare_url",
+        "compare_commit_count",
+        "generated_at",
+    ):
+        metadata_sheet.append([key, result.get(key, "")])
+
+    summary_sheet = workbook.create_sheet(title="Summary")
+    summary_sheet.append(["metric", "value"])
+    summary_sheet.append(["warnings_count", len(result.get("warnings", []) or [])])
+    summary_sheet.append(["commit_count", int(result.get("compare_commit_count", 0) or 0)])
+
+    links_sheet = workbook.create_sheet(title="Links")
+    links_sheet.append(["label", "url"])
+    compare_url = str(result.get("compare_url", "") or "")
+    if compare_url:
+        links_sheet.append(["github_compare", compare_url])
+        compare_url_cell = links_sheet.cell(row=links_sheet.max_row, column=2)
+        compare_url_cell.hyperlink = compare_url
+        compare_url_cell.style = "Hyperlink"
+
+    commits_sheet = workbook.create_sheet(title="Compare Commits")
+    commits_sheet.append(["sha", "title", "url", "author", "date", "confidence", "source"])
+    for commit in result.get("commits", []) or []:
+        if not isinstance(commit, dict):
+            continue
+
+        commits_sheet.append(
+            [
+                commit.get("sha", ""),
+                commit.get("title", ""),
+                commit.get("url", ""),
+                commit.get("author", ""),
+                commit.get("date", ""),
+                commit.get("confidence", 0),
+                commit.get("source", ""),
+            ]
+        )
+
+        commit_url = str(commit.get("url", "") or "")
+        if commit_url:
+            commit_url_cell = commits_sheet.cell(row=commits_sheet.max_row, column=3)
+            commit_url_cell.hyperlink = commit_url
+            commit_url_cell.style = "Hyperlink"
+
+    warnings_sheet = workbook.create_sheet(title="Warnings")
+    warnings_sheet.append(["warning"])
+    for warning in result.get("warnings", []) or []:
+        warnings_sheet.append([warning])
+
+    for sheet in (metadata_sheet, summary_sheet, links_sheet, commits_sheet, warnings_sheet):
+        sheet.freeze_panes = "A2"
+        _style_header_row(sheet)
+        _autosize_columns(sheet)
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
