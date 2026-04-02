@@ -505,6 +505,7 @@ def _select_version_interactively(
     verbose: bool = False,
     selection_prompt: str = "No version supplied. Select major.minor branch first:",
     manual_prompt: str = "Enter Chrome version manually (or q to quit): ",
+    include_cve_counts: bool = True,
 ) -> str | None:
     if verbose:
         print(
@@ -514,7 +515,11 @@ def _select_version_interactively(
         )
 
     versions = _fetch_recent_chrome_versions(limit=None, verbose=verbose)
-    menu_cve_count, warm_branch_counts = _build_menu_cve_counter(config=config, verbose=verbose)
+    if include_cve_counts:
+        menu_cve_count, warm_branch_counts = _build_menu_cve_counter(config=config, verbose=verbose)
+    else:
+        menu_cve_count = lambda _version_hint, resolve=False: "-"
+        warm_branch_counts = lambda _branch, _branch_versions: None
 
     if versions:
         grouped = _group_versions_by_major_minor(versions)
@@ -526,12 +531,20 @@ def _select_version_interactively(
         def _format_branch_option(index: int, branch: str) -> str:
             latest = grouped[branch][0] if grouped.get(branch) else ""
             version_count = len(grouped.get(branch, []))
-            cve_count = menu_cve_count(branch, resolve=False)
+            if include_cve_counts:
+                cve_count = menu_cve_count(branch, resolve=False)
+                return (
+                    f"{Fore.CYAN}{index:>4}.{Style.RESET_ALL} "
+                    f"{Fore.GREEN}{branch}{Style.RESET_ALL} "
+                    f"(versions: {Fore.YELLOW}{version_count}{Style.RESET_ALL}, "
+                    f"CVEs: {Fore.YELLOW}{cve_count}{Style.RESET_ALL}, "
+                    f"latest: {Fore.CYAN}{latest}{Style.RESET_ALL})"
+                )
+
             return (
                 f"{Fore.CYAN}{index:>4}.{Style.RESET_ALL} "
                 f"{Fore.GREEN}{branch}{Style.RESET_ALL} "
                 f"(versions: {Fore.YELLOW}{version_count}{Style.RESET_ALL}, "
-                f"CVEs: {Fore.YELLOW}{cve_count}{Style.RESET_ALL}, "
                 f"latest: {Fore.CYAN}{latest}{Style.RESET_ALL})"
             )
 
@@ -576,28 +589,36 @@ def _select_version_interactively(
                         print(f"{Fore.YELLOW}No versions found in that branch. Try again.{Style.RESET_ALL}")
                         continue
 
-                    if menu_cve_count(selected_branch, resolve=False) == "...":
-                        print(
-                            f"{Fore.YELLOW}Fetching CVE counts for branch {selected_branch}; please wait...{Style.RESET_ALL}",
-                            flush=True,
-                        )
-                    warm_branch_counts(selected_branch, branch_versions)
-                    if menu_cve_count(selected_branch, resolve=False) != "...":
-                        print(
-                            f"{Fore.GREEN}CVE counts ready for branch {selected_branch}.{Style.RESET_ALL}",
-                            flush=True,
-                        )
+                    if include_cve_counts:
+                        if menu_cve_count(selected_branch, resolve=False) == "...":
+                            print(
+                                f"{Fore.YELLOW}Fetching CVE counts for branch {selected_branch}; please wait...{Style.RESET_ALL}",
+                                flush=True,
+                            )
+                        warm_branch_counts(selected_branch, branch_versions)
+                        if menu_cve_count(selected_branch, resolve=False) != "...":
+                            print(
+                                f"{Fore.GREEN}CVE counts ready for branch {selected_branch}.{Style.RESET_ALL}",
+                                flush=True,
+                            )
 
                     version_page = 0
 
                     def _format_version_option(index: int, full_version: str) -> str:
                         _, _, build, patch = _version_sort_key(full_version)
-                        cve_count = menu_cve_count(full_version, resolve=False)
+                        if include_cve_counts:
+                            cve_count = menu_cve_count(full_version, resolve=False)
+                            return (
+                                f"{Fore.CYAN}{index:>4}.{Style.RESET_ALL} "
+                                f"{Fore.GREEN}{build}.{patch}{Style.RESET_ALL} -> "
+                                f"{Fore.CYAN}{full_version}{Style.RESET_ALL} "
+                                f"(CVEs: {Fore.YELLOW}{cve_count}{Style.RESET_ALL})"
+                            )
+
                         return (
                             f"{Fore.CYAN}{index:>4}.{Style.RESET_ALL} "
                             f"{Fore.GREEN}{build}.{patch}{Style.RESET_ALL} -> "
-                            f"{Fore.CYAN}{full_version}{Style.RESET_ALL} "
-                            f"(CVEs: {Fore.YELLOW}{cve_count}{Style.RESET_ALL})"
+                            f"{Fore.CYAN}{full_version}{Style.RESET_ALL}"
                         )
 
                     while True:
@@ -727,6 +748,7 @@ def _resolve_compare_versions(args: argparse.Namespace, config: PipelineConfig) 
                 verbose=args.verbose,
                 selection_prompt="Select BASE (older) Chrome version for GitHub compare:",
                 manual_prompt="Enter BASE version manually (or q to quit): ",
+                include_cve_counts=False,
             )
             or ""
         )
@@ -738,6 +760,7 @@ def _resolve_compare_versions(args: argparse.Namespace, config: PipelineConfig) 
                 verbose=args.verbose,
                 selection_prompt="Select HEAD (newer) Chrome version for GitHub compare:",
                 manual_prompt="Enter HEAD version manually (or q to quit): ",
+                include_cve_counts=False,
             )
             or ""
         )
