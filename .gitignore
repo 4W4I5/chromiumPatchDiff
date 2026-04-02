@@ -17,3 +17,4 @@ cves/**
 !cves/2025/6xxx/**
 !cves/2025/7xxx/**
 # END slowPush managed block
+reports/
