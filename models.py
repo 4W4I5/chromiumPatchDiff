@@ -9,6 +9,7 @@ class CommitEvidence:
     sha: str
     url: str
     title: str
+    message: str = ""
     author: str = ""
     date: str = ""
     confidence: float = 0.0
@@ -20,6 +21,7 @@ class CommitEvidence:
             sha=str(payload.get("sha", "")),
             url=str(payload.get("url", "")),
             title=str(payload.get("title", "")),
+            message=str(payload.get("message", "")),
             author=str(payload.get("author", "")),
             date=str(payload.get("date", "")),
             confidence=float(payload.get("confidence", 0.0) or 0.0),

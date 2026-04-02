@@ -185,18 +185,34 @@ def write_compare_xlsx(result: dict[str, Any], output_path: str) -> None:
     for key in (
         "task",
         "compare_repo",
+        "compare_component",
+        "compare_platform",
+        "compare_release_channel",
         "compare_base_version",
         "compare_head_version",
         "compare_url",
         "compare_commit_count",
+        "compare_file_count",
+        "compare_keyword",
         "generated_at",
     ):
         metadata_sheet.append([key, result.get(key, "")])
+
+    metadata_sheet.append(["compare_path_prefixes", _as_joined_lines(result.get("compare_path_prefixes", []) or [])])
+    metadata_sheet.append(["compare_file_extensions", _as_joined_lines(result.get("compare_file_extensions", []) or [])])
 
     summary_sheet = workbook.create_sheet(title="Summary")
     summary_sheet.append(["metric", "value"])
     summary_sheet.append(["warnings_count", len(result.get("warnings", []) or [])])
     summary_sheet.append(["commit_count", int(result.get("compare_commit_count", 0) or 0)])
+    summary_sheet.append(["file_count", int(result.get("compare_file_count", 0) or 0)])
+
+    compare_meta = result.get("compare_meta", {}) if isinstance(result.get("compare_meta", {}), dict) else {}
+    summary_sheet.append(["total_commits_api", int(compare_meta.get("total_commits", 0) or 0)])
+    summary_sheet.append(["total_files_api", int(compare_meta.get("total_files", 0) or 0)])
+    summary_sheet.append(["ahead_by", int(compare_meta.get("ahead_by", 0) or 0)])
+    summary_sheet.append(["behind_by", int(compare_meta.get("behind_by", 0) or 0)])
+    summary_sheet.append(["truncated", bool(compare_meta.get("truncated", False))])
 
     links_sheet = workbook.create_sheet(title="Links")
     links_sheet.append(["label", "url"])
@@ -208,7 +224,7 @@ def write_compare_xlsx(result: dict[str, Any], output_path: str) -> None:
         compare_url_cell.style = "Hyperlink"
 
     commits_sheet = workbook.create_sheet(title="Compare Commits")
-    commits_sheet.append(["sha", "title", "url", "author", "date", "confidence", "source"])
+    commits_sheet.append(["sha", "title", "message", "url", "author", "date", "confidence", "source"])
     for commit in result.get("commits", []) or []:
         if not isinstance(commit, dict):
             continue
@@ -217,6 +233,7 @@ def write_compare_xlsx(result: dict[str, Any], output_path: str) -> None:
             [
                 commit.get("sha", ""),
                 commit.get("title", ""),
+                commit.get("message", ""),
                 commit.get("url", ""),
                 commit.get("author", ""),
                 commit.get("date", ""),
@@ -227,19 +244,55 @@ def write_compare_xlsx(result: dict[str, Any], output_path: str) -> None:
 
         commit_url = str(commit.get("url", "") or "")
         if commit_url:
-            commit_url_cell = commits_sheet.cell(row=commits_sheet.max_row, column=3)
+            commit_url_cell = commits_sheet.cell(row=commits_sheet.max_row, column=4)
             commit_url_cell.hyperlink = commit_url
             commit_url_cell.style = "Hyperlink"
+
+    files_sheet = workbook.create_sheet(title="Compare Files")
+    files_sheet.append(
+        [
+            "filename",
+            "status",
+            "additions",
+            "deletions",
+            "changes",
+            "blob_url",
+            "raw_url",
+            "patch",
+        ]
+    )
+    for file_item in result.get("files", []) or []:
+        if not isinstance(file_item, dict):
+            continue
+
+        files_sheet.append(
+            [
+                file_item.get("filename", ""),
+                file_item.get("status", ""),
+                int(file_item.get("additions", 0) or 0),
+                int(file_item.get("deletions", 0) or 0),
+                int(file_item.get("changes", 0) or 0),
+                file_item.get("blob_url", ""),
+                file_item.get("raw_url", ""),
+                file_item.get("patch", ""),
+            ]
+        )
+
+        blob_url = str(file_item.get("blob_url", "") or "")
+        if blob_url:
+            blob_cell = files_sheet.cell(row=files_sheet.max_row, column=6)
+            blob_cell.hyperlink = blob_url
+            blob_cell.style = "Hyperlink"
 
     warnings_sheet = workbook.create_sheet(title="Warnings")
     warnings_sheet.append(["warning"])
     for warning in result.get("warnings", []) or []:
         warnings_sheet.append([warning])
 
-    for sheet in (metadata_sheet, summary_sheet, links_sheet, commits_sheet, warnings_sheet):
+    for sheet in (metadata_sheet, summary_sheet, links_sheet, commits_sheet, files_sheet, warnings_sheet):
         sheet.freeze_panes = "A2"
         _style_header_row(sheet)
-        _autosize_columns(sheet)
+        _autosize_columns(sheet, max_width=120 if sheet.title == "Compare Files" else 80)
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)

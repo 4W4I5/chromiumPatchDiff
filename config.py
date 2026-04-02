@@ -11,6 +11,40 @@ class SourceMode(str, Enum):
     PUBLIC = "public"
 
 
+class CompareComponent(str, Enum):
+    CHROME = "chrome"
+    PDFIUM = "pdfium"
+    SKIA = "skia"
+    V8 = "v8"
+
+
+class ComparePlatform(str, Enum):
+    ALL = "all"
+    WINDOWS = "windows"
+    LINUX = "linux"
+    MACOS = "macos"
+    ANDROID = "android"
+
+
+class ReleaseChannel(str, Enum):
+    STABLE = "stable"
+    BETA = "beta"
+    DEV = "dev"
+    CANARY = "canary"
+
+
+COMPONENT_REPO_MAP: dict[CompareComponent, str] = {
+    CompareComponent.CHROME: "chromium/chromium",
+    CompareComponent.PDFIUM: "pdfium/pdfium",
+    CompareComponent.SKIA: "google/skia",
+    CompareComponent.V8: "v8/v8",
+}
+
+
+def resolve_component_repo(component: CompareComponent) -> str:
+    return COMPONENT_REPO_MAP.get(component, COMPONENT_REPO_MAP[CompareComponent.CHROME])
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:

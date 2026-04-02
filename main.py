@@ -6,9 +6,11 @@ import argparse
 import json
 import re
 import sys
+import threading
 import webbrowser
 from dataclasses import asdict
 from datetime import datetime, timezone
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -18,8 +20,15 @@ from colorama import init as colorama_init
 
 from chrome import Chrome
 from clients.http_client import HttpClient
-from config import PipelineConfig, SourceMode
-from exporters.xlsx_exporter import write_compare_xlsx, write_enrichment_xlsx
+from config import (
+    CompareComponent,
+    ComparePlatform,
+    PipelineConfig,
+    ReleaseChannel,
+    SourceMode,
+    resolve_component_repo,
+)
+from exporters.html_exporter import write_compare_html
 from pipeline.orchestrator import EnrichmentOrchestrator
 from sources.chromium_source import ChromiumMirrorSource
 from sources.cve_local_source import CveLocalListSource
@@ -69,9 +78,54 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--compare-output",
-        choices=["browser", "xlsx", "both"],
-        default="browser",
-        help="Compare task output mode: open browser, write XLSX, or both (default: browser).",
+        choices=["browser", "xlsx", "both", "html-server", "browser-html", "csv"],
+        default="browser-html",
+        help=(
+            "Compare task output mode: browser (GitHub URL), xlsx, both, html-server, browser-html, "
+            "or deprecated csv alias (falls back to xlsx). Default: browser-html."
+        ),
+    )
+    parser.add_argument(
+        "--component",
+        choices=[item.value for item in CompareComponent],
+        help="Compare component target: chrome, pdfium, skia, or v8.",
+    )
+    parser.add_argument(
+        "--platform",
+        choices=[item.value for item in ComparePlatform],
+        help="Compare platform filter: all, windows, linux, macos, android.",
+    )
+    parser.add_argument(
+        "--release-channel",
+        choices=[item.value for item in ReleaseChannel],
+        help="Release channel selector for interactive version/tag discovery.",
+    )
+    parser.add_argument(
+        "--path-prefix",
+        action="append",
+        default=[],
+        help="Optional changed-file path prefix filter (repeatable).",
+    )
+    parser.add_argument(
+        "--file-ext",
+        action="append",
+        default=[],
+        help="Optional file extension filter for changed files (repeatable, e.g. .cc or cc).",
+    )
+    parser.add_argument(
+        "--keyword",
+        default="",
+        help="Optional keyword filter applied to commit message and patch text.",
+    )
+    parser.add_argument(
+        "--html-output",
+        help="HTML compare report output path. Defaults to reports/github_compare_<base>_to_<head>.html.",
+    )
+    parser.add_argument(
+        "--html-port",
+        type=int,
+        default=8765,
+        help="Local port for html-server compare mode (default: 8765).",
     )
     parser.add_argument(
         "--output",
@@ -506,15 +560,19 @@ def _select_version_interactively(
     selection_prompt: str = "No version supplied. Select major.minor branch first:",
     manual_prompt: str = "Enter Chrome version manually (or q to quit): ",
     include_cve_counts: bool = True,
+    preloaded_versions: list[str] | None = None,
 ) -> str | None:
-    if verbose:
-        print(
-            f"{Fore.MAGENTA}[VERBOSE]{Style.RESET_ALL} "
-            f"{Fore.GREEN}Loading Chromium tag list for interactive version selection...{Style.RESET_ALL}",
-            file=sys.stderr,
-        )
+    if preloaded_versions is not None:
+        versions = sorted(set(preloaded_versions), key=_version_sort_key, reverse=True)
+    else:
+        if verbose:
+            print(
+                f"{Fore.MAGENTA}[VERBOSE]{Style.RESET_ALL} "
+                f"{Fore.GREEN}Loading Chromium tag list for interactive version selection...{Style.RESET_ALL}",
+                file=sys.stderr,
+            )
 
-    versions = _fetch_recent_chrome_versions(limit=None, verbose=verbose)
+        versions = _fetch_recent_chrome_versions(limit=None, verbose=verbose)
     if include_cve_counts:
         menu_cve_count, warm_branch_counts = _build_menu_cve_counter(config=config, verbose=verbose)
     else:
@@ -700,6 +758,147 @@ def _default_compare_xlsx_output_path(base_version: str, head_version: str) -> P
     return Path("reports") / f"github_compare_{safe_base}_to_{safe_head}.xlsx"
 
 
+def _default_compare_html_output_path(base_version: str, head_version: str) -> Path:
+    safe_base = base_version.replace(".", "_")
+    safe_head = head_version.replace(".", "_")
+    return Path("reports") / f"github_compare_{safe_base}_to_{safe_head}.html"
+
+
+def _is_four_part_version(value: str) -> bool:
+    return bool(re.fullmatch(r"\d+\.\d+\.\d+\.\d+", (value or "").strip()))
+
+
+def _normalize_compare_ref(raw_value: str) -> str:
+    value = (raw_value or "").strip()
+    if not value:
+        return ""
+    try:
+        return Chrome(value).getVersion()
+    except ValueError:
+        return value
+
+
+def _normalize_compare_output_mode(raw_mode: str) -> tuple[str, list[str]]:
+    mode = (raw_mode or "browser-html").strip().lower()
+    warnings: list[str] = []
+    if mode == "csv":
+        warnings.append("Compare output mode 'csv' is deprecated; falling back to 'xlsx'.")
+        return "xlsx", warnings
+    return mode, warnings
+
+
+def _select_from_menu(prompt: str, options: list[tuple[str, str]]) -> str | None:
+    while True:
+        print(f"{Fore.MAGENTA}{prompt}{Style.RESET_ALL}")
+        for index, (_, label) in enumerate(options, start=1):
+            print(f"  {Fore.CYAN}{index}.{Style.RESET_ALL} {Fore.GREEN}{label}{Style.RESET_ALL}")
+        print(f"  {Fore.CYAN}q.{Style.RESET_ALL} Quit")
+
+        choice = _prompt_choice(f"{Fore.MAGENTA}Enter selection [1-{len(options)}, q]: {Style.RESET_ALL}")
+        if choice in {"q", "quit", "exit"}:
+            return None
+        if choice.isdigit():
+            selected_index = int(choice)
+            if 1 <= selected_index <= len(options):
+                return options[selected_index - 1][0]
+        print(f"{Fore.YELLOW}Invalid selection. Try again.{Style.RESET_ALL}")
+
+
+def _resolve_compare_scope(args: argparse.Namespace) -> tuple[CompareComponent, ComparePlatform, ReleaseChannel] | None:
+    component = (args.component or "").strip().lower()
+    platform = (args.platform or "").strip().lower()
+    release = (args.release_channel or "").strip().lower()
+
+    if not component:
+        if not sys.stdin.isatty():
+            component = CompareComponent.CHROME.value
+        else:
+            selected_component = _select_from_menu(
+                prompt="Select compare component:",
+                options=[
+                    (CompareComponent.CHROME.value, "Chrome"),
+                    (CompareComponent.PDFIUM.value, "Pdfium"),
+                    (CompareComponent.SKIA.value, "Skia"),
+                    (CompareComponent.V8.value, "V8"),
+                ],
+            )
+            if not selected_component:
+                return None
+            component = selected_component
+
+    if not platform:
+        if not sys.stdin.isatty():
+            platform = ComparePlatform.ALL.value
+        else:
+            selected_platform = _select_from_menu(
+                prompt="Select platform filter:",
+                options=[
+                    (ComparePlatform.WINDOWS.value, "Windows"),
+                    (ComparePlatform.LINUX.value, "Linux"),
+                    (ComparePlatform.MACOS.value, "macOS"),
+                    (ComparePlatform.ANDROID.value, "Android"),
+                    (ComparePlatform.ALL.value, "All platforms"),
+                ],
+            )
+            if not selected_platform:
+                return None
+            platform = selected_platform
+
+    if not release:
+        if not sys.stdin.isatty():
+            release = ReleaseChannel.STABLE.value
+        else:
+            selected_release = _select_from_menu(
+                prompt="Select release channel:",
+                options=[
+                    (ReleaseChannel.STABLE.value, "Stable"),
+                    (ReleaseChannel.BETA.value, "Beta"),
+                    (ReleaseChannel.DEV.value, "Dev"),
+                    (ReleaseChannel.CANARY.value, "Canary"),
+                ],
+            )
+            if not selected_release:
+                return None
+            release = selected_release
+
+    return CompareComponent(component), ComparePlatform(platform), ReleaseChannel(release)
+
+
+def _fetch_versions_for_compare(
+    config: PipelineConfig,
+    component: CompareComponent,
+    release_channel: ReleaseChannel,
+    verbose: bool,
+) -> list[str]:
+    repo = resolve_component_repo(component)
+    if component == CompareComponent.CHROME and release_channel == ReleaseChannel.STABLE:
+        return _fetch_recent_chrome_versions(limit=None, verbose=verbose)
+
+    source = ChromiumMirrorSource(HttpClient(config), config)
+    versions, warnings = source.list_version_tags(repo=repo, release_channel=release_channel)
+    if verbose and warnings:
+        for warning in warnings:
+            print(
+                f"{Fore.MAGENTA}[VERBOSE]{Style.RESET_ALL} " f"{Fore.YELLOW}{warning}{Style.RESET_ALL}",
+                file=sys.stderr,
+            )
+    return versions
+
+
+def _start_ephemeral_html_server(html_path: Path, port: int) -> tuple[ThreadingHTTPServer, threading.Thread, str]:
+    directory = str(html_path.parent.resolve())
+
+    class _StaticHandler(SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=directory, **kwargs)
+
+    server = ThreadingHTTPServer(("127.0.0.1", port), _StaticHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    local_url = f"http://127.0.0.1:{port}/{html_path.name}"
+    return server, thread, local_url
+
+
 def _select_task_interactively() -> str | None:
     options = [
         ("enrich", "List CVEs for a given chrome version"),
@@ -729,9 +928,21 @@ def _build_compare_url(repo: str, base_version: str, head_version: str) -> str:
     return f"https://github.com/{repo_path}/compare/{base_version}...{head_version}"
 
 
-def _resolve_compare_versions(args: argparse.Namespace, config: PipelineConfig) -> tuple[str, str] | None:
+def _resolve_compare_versions(
+    args: argparse.Namespace,
+    config: PipelineConfig,
+    component: CompareComponent,
+    release_channel: ReleaseChannel,
+) -> tuple[str, str] | None:
     base_version = (args.base_version or "").strip()
     head_version = (args.head_version or args.version or "").strip()
+    scoped_versions = _fetch_versions_for_compare(
+        config=config,
+        component=component,
+        release_channel=release_channel,
+        verbose=args.verbose,
+    )
+    component_label = component.value.upper()
 
     if not base_version and not sys.stdin.isatty():
         print("Compare task requires --base-version in non-interactive mode.", file=sys.stderr)
@@ -746,9 +957,10 @@ def _resolve_compare_versions(args: argparse.Namespace, config: PipelineConfig) 
             _select_version_interactively(
                 config=config,
                 verbose=args.verbose,
-                selection_prompt="Select BASE (older) Chrome version for GitHub compare:",
-                manual_prompt="Enter BASE version manually (or q to quit): ",
+                selection_prompt=f"Select BASE (older) {component_label} version for GitHub compare:",
+                manual_prompt=f"Enter BASE {component_label} version/tag manually (or q to quit): ",
                 include_cve_counts=False,
+                preloaded_versions=scoped_versions,
             )
             or ""
         )
@@ -758,9 +970,10 @@ def _resolve_compare_versions(args: argparse.Namespace, config: PipelineConfig) 
             _select_version_interactively(
                 config=config,
                 verbose=args.verbose,
-                selection_prompt="Select HEAD (newer) Chrome version for GitHub compare:",
-                manual_prompt="Enter HEAD version manually (or q to quit): ",
+                selection_prompt=f"Select HEAD (newer) {component_label} version for GitHub compare:",
+                manual_prompt=f"Enter HEAD {component_label} version/tag manually (or q to quit): ",
                 include_cve_counts=False,
+                preloaded_versions=scoped_versions,
             )
             or ""
         )
@@ -772,24 +985,41 @@ def _resolve_compare_versions(args: argparse.Namespace, config: PipelineConfig) 
 
 
 def _run_compare_task(args: argparse.Namespace, config: PipelineConfig) -> int:
-    resolved_versions = _resolve_compare_versions(args=args, config=config)
+    compare_scope = _resolve_compare_scope(args)
+    if not compare_scope:
+        print("No compare scope selected. Exiting.", file=sys.stderr)
+        return 1
+
+    component, platform, release_channel = compare_scope
+    config.github_repo = resolve_component_repo(component)
+
+    resolved_versions = _resolve_compare_versions(
+        args=args,
+        config=config,
+        component=component,
+        release_channel=release_channel,
+    )
     if not resolved_versions:
         print("No compare versions selected. Exiting.", file=sys.stderr)
         return 1
 
     base_version_raw, head_version_raw = resolved_versions
 
-    try:
-        canonical_base = Chrome(base_version_raw).getVersion()
-        canonical_head = Chrome(head_version_raw).getVersion()
-    except ValueError as exc:
-        print(f"Invalid version format: {exc}", file=sys.stderr)
+    canonical_base = _normalize_compare_ref(base_version_raw)
+    canonical_head = _normalize_compare_ref(head_version_raw)
+    if not canonical_base or not canonical_head:
+        print("Both base and head versions/tags are required.", file=sys.stderr)
         return 2
 
-    version_cmp = _compare_versions(canonical_base, canonical_head)
-    if version_cmp == 0:
+    if canonical_base == canonical_head:
         print("Base and head versions are identical; compare requires two different versions.", file=sys.stderr)
         return 2
+
+    if _is_four_part_version(canonical_base) and _is_four_part_version(canonical_head):
+        version_cmp = _compare_versions(canonical_base, canonical_head)
+    else:
+        version_cmp = -1
+
     if version_cmp > 0:
         print(
             f"Swapping versions so compare range is older...newer ({canonical_head}...{canonical_base}).",
@@ -798,34 +1028,60 @@ def _run_compare_task(args: argparse.Namespace, config: PipelineConfig) -> int:
         canonical_base, canonical_head = canonical_head, canonical_base
 
     compare_url = _build_compare_url(config.github_repo, canonical_base, canonical_head)
-    warnings: list[str] = []
+    compare_mode, output_warnings = _normalize_compare_output_mode(args.compare_output)
+    warnings: list[str] = list(output_warnings)
     commits: list[dict[str, Any]] = []
+    files: list[dict[str, Any]] = []
+    compare_metadata: dict[str, Any] = {}
 
-    needs_compare_commits = args.compare_output in {"xlsx", "both"} or bool(args.output) or args.print_json
-    if needs_compare_commits:
-        http = HttpClient(config)
-        source = ChromiumMirrorSource(http, config)
-        compare_commits, compare_warnings = source.get_compare_commits(
+    needs_compare_payload = compare_mode in {"xlsx", "both", "html-server", "browser-html"} or bool(args.output) or args.print_json
+    if needs_compare_payload:
+        source = ChromiumMirrorSource(HttpClient(config), config)
+        compare_payload, compare_warnings = source.get_compare_diff(
             base_version=canonical_base,
             head_version=canonical_head,
+            platform=platform,
+            component=component,
+            path_prefixes=args.path_prefix,
+            file_extensions=args.file_ext,
+            keyword=args.keyword,
         )
-        commits = [asdict(commit) for commit in compare_commits]
+        commits = [asdict(commit) for commit in compare_payload.get("commits", []) or []]
+        files = [item for item in compare_payload.get("files", []) or [] if isinstance(item, dict)]
+        compare_metadata = {
+            "total_commits": int(compare_payload.get("total_commits", 0) or 0),
+            "ahead_by": int(compare_payload.get("ahead_by", 0) or 0),
+            "behind_by": int(compare_payload.get("behind_by", 0) or 0),
+            "total_files": int(compare_payload.get("total_files", 0) or 0),
+            "truncated": bool(compare_payload.get("truncated", False)),
+        }
         warnings.extend(compare_warnings)
+        if compare_metadata.get("truncated"):
+            warnings.append("GitHub compare file list appears truncated for this range; reduce range for full fidelity.")
 
     result = {
         "task": "compare",
         "compare_repo": config.github_repo,
+        "compare_component": component.value,
+        "compare_platform": platform.value,
+        "compare_release_channel": release_channel.value,
         "compare_base_version": canonical_base,
         "compare_head_version": canonical_head,
         "compare_url": compare_url,
         "compare_commit_count": len(commits),
+        "compare_file_count": len(files),
+        "compare_path_prefixes": [item.strip() for item in args.path_prefix if item.strip()],
+        "compare_file_extensions": [item.strip() for item in args.file_ext if item.strip()],
+        "compare_keyword": (args.keyword or "").strip(),
         "commits": commits,
+        "files": files,
+        "compare_meta": compare_metadata,
         "warnings": warnings,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
     browser_message = ""
-    if args.compare_output in {"browser", "both"}:
+    if compare_mode in {"browser", "both", "browser-html"}:
         try:
             opened = webbrowser.open(compare_url, new=2)
             if opened:
@@ -835,10 +1091,63 @@ def _run_compare_task(args: argparse.Namespace, config: PipelineConfig) -> int:
         except Exception as exc:
             browser_message = f"Browser launch failed: {exc}"
 
-    if args.compare_output in {"xlsx", "both"}:
+    if compare_mode in {"xlsx", "both"}:
         xlsx_output_path = Path(args.xlsx_output) if args.xlsx_output else _default_compare_xlsx_output_path(canonical_base, canonical_head)
-        write_compare_xlsx(result, str(xlsx_output_path))
-        print(f"Compare XLSX written to: {xlsx_output_path}")
+        try:
+            from exporters.xlsx_exporter import write_compare_xlsx
+
+            write_compare_xlsx(result, str(xlsx_output_path))
+            print(f"Compare XLSX written to: {xlsx_output_path}")
+        except ModuleNotFoundError as exc:
+            warnings.append(f"XLSX export skipped because dependency is missing: {exc}")
+            print(f"Warning: XLSX export skipped because dependency is missing: {exc}")
+            if compare_mode == "xlsx":
+                html_output_path = Path(args.html_output) if args.html_output else _default_compare_html_output_path(canonical_base, canonical_head)
+                write_compare_html(result=result, output_path=str(html_output_path))
+                print(f"Fallback HTML written to: {html_output_path}")
+
+    if compare_mode in {"html-server", "browser-html"}:
+        html_output_path = Path(args.html_output) if args.html_output else _default_compare_html_output_path(canonical_base, canonical_head)
+        write_compare_html(result=result, output_path=str(html_output_path))
+        print(f"Compare HTML written to: {html_output_path}")
+
+        try:
+            server, server_thread, local_url = _start_ephemeral_html_server(
+                html_path=html_output_path,
+                port=max(1, int(args.html_port or 8765)),
+            )
+        except OSError as exc:
+            warnings.append(f"Local HTML server could not start: {exc}")
+            print(f"Warning: Local HTML server could not start: {exc}")
+            server = None
+            server_thread = None
+            local_url = ""
+
+        local_browser_message = ""
+        if local_url:
+            try:
+                opened = webbrowser.open(local_url, new=2)
+                if opened:
+                    local_browser_message = "Local HTML diff opened in browser."
+                else:
+                    local_browser_message = "Local HTML diff server started; open URL manually if browser did not launch."
+            except Exception as exc:
+                local_browser_message = f"Local HTML browser launch failed: {exc}"
+
+            print(f"Local HTML diff URL: {local_url}")
+            if local_browser_message:
+                print(local_browser_message)
+
+            try:
+                print("HTML diff server is running. Press Ctrl+C to stop.")
+                if server_thread is not None:
+                    server_thread.join()
+            except KeyboardInterrupt:
+                print("Stopping HTML diff server...")
+            finally:
+                if server is not None:
+                    server.shutdown()
+                    server.server_close()
 
     if args.output:
         output_path = Path(args.output)
@@ -917,13 +1226,18 @@ def _run_enrichment_task(args: argparse.Namespace, config: PipelineConfig) -> in
 
     if has_output_records:
         xlsx_output_path = Path(args.xlsx_output) if args.xlsx_output else _default_xlsx_output_path(selected_version)
-        write_enrichment_xlsx(result, str(xlsx_output_path))
-        if args.verbose:
-            print(
-                f"{Fore.MAGENTA}[VERBOSE]{Style.RESET_ALL} "
-                f"{Fore.GREEN}Wrote XLSX output to:{Style.RESET_ALL} {Fore.CYAN}{xlsx_output_path}{Style.RESET_ALL}",
-                file=sys.stderr,
-            )
+        try:
+            from exporters.xlsx_exporter import write_enrichment_xlsx
+
+            write_enrichment_xlsx(result, str(xlsx_output_path))
+            if args.verbose:
+                print(
+                    f"{Fore.MAGENTA}[VERBOSE]{Style.RESET_ALL} "
+                    f"{Fore.GREEN}Wrote XLSX output to:{Style.RESET_ALL} {Fore.CYAN}{xlsx_output_path}{Style.RESET_ALL}",
+                    file=sys.stderr,
+                )
+        except ModuleNotFoundError as exc:
+            print(f"Warning: XLSX export skipped because dependency is missing: {exc}", file=sys.stderr)
     elif args.verbose:
         print(
             f"{Fore.MAGENTA}[VERBOSE]{Style.RESET_ALL} "
