@@ -84,6 +84,29 @@ class HttpClient:
 
         return response.status_code, response.text, f"HTTP {response.status_code}: {response.text[:300]}"
 
+    def try_get_bytes(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, bytes, dict[str, str], str | None]:
+        try:
+            response = self._session.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=self._config.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            return 0, b"", {}, str(exc)
+
+        if response.ok:
+            return response.status_code, response.content, dict(response.headers), None
+
+        detail = response.text[:300]
+        return response.status_code, response.content, dict(response.headers), f"HTTP {response.status_code}: {detail}"
+
     def try_post_json(
         self,
         url: str,

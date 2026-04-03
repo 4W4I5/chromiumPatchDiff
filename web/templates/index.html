@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chromium Patch Diff Web</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/css/site.css" />
+</head>
+<body>
+  <main class="shell">
+    <section class="hero card">
+      <div>
+        <p class="eyebrow">Web-Only Branch</p>
+        <h1>Chromium Patched vs Unpatched Diff Explorer</h1>
+        <p class="lede">
+          Enter a CVE ID or Chromium version. The app resolves patched and vulnerable predecessor versions,
+          enriches CVE data from local/public/NVD sources, and compares selected components with directory-level filtering.
+        </p>
+      </div>
+      <div class="hero-meta">
+        <p><span>Default platform:</span> Windows</p>
+        <p><span>Default component:</span> Chrome (deep-dive mode)</p>
+        <p><span>Report:</span> DOCX</p>
+      </div>
+    </section>
+
+    <section class="grid">
+      <form id="analysis-form" class="card form-card">
+        <h2>Analysis Input</h2>
+
+        <label for="input-mode">Input mode</label>
+        <select id="input-mode" name="input_mode">
+          <option value="cve">CVE ID</option>
+          <option value="version">Chromium Version</option>
+        </select>
+
+        <div id="field-cve" class="field-block">
+          <label for="cve-id">CVE ID</label>
+          <input id="cve-id" name="cve_id" type="text" placeholder="CVE-2026-5258" />
+        </div>
+
+        <div id="field-version" class="field-block hidden">
+          <label for="version-input-method">Version input method</label>
+          <select id="version-input-method" name="version_input_method">
+            <option value="manual">Manual typed input</option>
+            <option value="dropdown">Dropdown selection</option>
+          </select>
+
+          <div id="version-manual-field" class="field-block nested-field">
+            <label for="version">Chromium version (manual)</label>
+            <input id="version" name="version" type="text" placeholder="146.0.7680.178" />
+          </div>
+
+          <div id="version-dropdown-field" class="field-block nested-field hidden">
+            <label for="version-major">Major version</label>
+            <select id="version-major" name="version_major">
+              <option value="">All major versions</option>
+            </select>
+
+            <label for="version-select">Chromium version (dropdown)</label>
+            <select id="version-select" name="version_select">
+              <option value="">Loading versions...</option>
+            </select>
+
+            <p id="version-dropdown-hint" class="helper-subtitle">Choose a major version to narrow the dropdown, or keep All major versions.</p>
+          </div>
+        </div>
+
+        <button id="advanced-toggle" type="button" class="toggle-link" aria-expanded="false">Show Advanced Filters</button>
+
+        <fieldset id="advanced-panel" class="advanced-panel hidden">
+          <legend>Advanced Filters (Optional)</legend>
+
+          <label for="platform">Platform filter</label>
+          <select id="platform" name="platform">
+            {% for platform in platforms %}
+            <option value="{{ platform.value }}" {% if platform.value == default_platform %}selected{% endif %}>{{ platform.label }}</option>
+            {% endfor %}
+          </select>
+
+          <fieldset class="component-box">
+            <legend>Components</legend>
+            <div class="component-grid">
+              {% for component in components %}
+              <label>
+                <input type="checkbox" name="components" value="{{ component.value }}" {% if component.value == "chrome" %}checked{% endif %} />
+                <span>{{ component.label }}</span>
+              </label>
+              {% endfor %}
+            </div>
+          </fieldset>
+
+          <label for="path-prefixes">Directory filters (comma-separated)</label>
+          <textarea id="path-prefixes" name="path_prefixes" rows="3" placeholder="third_party/blink/renderer/modules/webcodecs, media/"></textarea>
+
+          <div class="directory-helper">
+            <p class="helper-title">Available directories from latest analysis</p>
+            <p class="helper-subtitle">Click a directory chip to append it to path filters.</p>
+            <div id="directory-catalog" class="directory-chip-list">
+              <span class="muted-note">Run an analysis to populate directory filters.</span>
+            </div>
+          </div>
+
+          <label for="file-extensions">Filename extensions (comma-separated)</label>
+          <input id="file-extensions" name="file_extensions" type="text" placeholder=".cc,.h,.gn" />
+
+          <label for="keyword">Keyword filter override</label>
+          <input id="keyword" name="keyword" type="text" placeholder="webcodecs,codec" />
+
+          <label for="limit"># of CVE Records</label>
+          <input id="limit" name="limit" type="number" min="1" max="500" value="25" />
+
+          <label class="checkbox-line" for="include-nvd">
+            <input id="include-nvd" name="include_nvd" type="checkbox" checked />
+            <span>Include NVD enrichment</span>
+          </label>
+        </fieldset>
+
+        <button id="run-analysis" type="submit">Start Analysis</button>
+      </form>
+
+      <section class="card results-card">
+        <h2>Job Status</h2>
+        <p id="job-status" class="status-line">Idle</p>
+        <div class="meter">
+          <div id="job-progress" class="meter-fill" style="width: 0%;"></div>
+        </div>
+
+        <div class="actions">
+          <button id="download-docx" type="button" class="secondary" disabled>Download DOCX Report</button>
+        </div>
+
+        <section>
+          <h3>Summary</h3>
+          <div id="summary" class="summary-grid"></div>
+        </section>
+
+        <section>
+          <h3>Effective Focus</h3>
+          <div id="effective-focus" class="focus-chip-list">
+            <span class="muted-note">Run an analysis to see applied auto-focus filters.</span>
+          </div>
+        </section>
+
+        <section>
+          <h3>Warnings</h3>
+          <ul id="warnings" class="warning-list"></ul>
+        </section>
+
+        <section>
+          <h3>Release Blog Matches</h3>
+          <div id="release-blog"></div>
+        </section>
+
+        <section>
+          <h3>Compare Results</h3>
+          <div id="compare-results"></div>
+        </section>
+
+        <section>
+          <h3>CVE Details</h3>
+          <div id="cve-details"></div>
+        </section>
+
+        <section>
+          <h3>Raw Payload</h3>
+          <pre id="raw-json">No result yet.</pre>
+        </section>
+      </section>
+    </section>
+  </main>
+
+  <script src="/static/js/app.js" defer></script>
+</body>
+</html>

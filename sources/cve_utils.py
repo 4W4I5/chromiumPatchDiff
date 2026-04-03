@@ -6,6 +6,40 @@ from typing import Any
 from models import CveRecord
 
 CVE_ID_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
+_TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]{2,}")
+
+_FOCUS_ALIAS_MAP: dict[str, list[str]] = {
+    "webcodecs": ["webcodecs", "codec"],
+    "codec": ["codec", "codecs"],
+    "webrtc": ["webrtc", "rtc"],
+    "pdfium": ["pdfium", "pdf"],
+    "skia": ["skia"],
+    "v8": ["v8", "javascript"],
+    "blink": ["blink", "renderer"],
+    "media": ["media", "codec"],
+    "gpu": ["gpu", "gl"],
+}
+
+_FOCUS_STOPWORDS = {
+    "out",
+    "bounds",
+    "read",
+    "write",
+    "use",
+    "after",
+    "free",
+    "in",
+    "the",
+    "and",
+    "for",
+    "via",
+    "from",
+    "memory",
+    "issue",
+    "vulnerability",
+    "chrome",
+    "chromium",
+}
 
 
 def find_cve_ids(text: str) -> list[str]:
@@ -207,3 +241,38 @@ def normalize_cve_record(raw: dict[str, Any], source: str) -> CveRecord | None:
         affected_versions=_extract_affected_versions(raw),
         raw=raw,
     )
+
+
+def infer_focus_keywords(title: str, description: str, limit: int = 8) -> list[str]:
+    combined = f"{str(title or '').strip()}\n{str(description or '').strip()}"
+    lowered = combined.lower()
+
+    collected: list[str] = []
+    seen: set[str] = set()
+
+    def _add(token: str) -> None:
+        normalized = str(token or "").strip().lower()
+        if not normalized:
+            return
+        if normalized in _FOCUS_STOPWORDS:
+            return
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        collected.append(normalized)
+
+    for trigger, aliases in _FOCUS_ALIAS_MAP.items():
+        if trigger in lowered:
+            for alias in aliases:
+                _add(alias)
+
+    for token in _TOKEN_RE.findall(str(title or "")):
+        _add(token)
+
+    if not collected:
+        for token in _TOKEN_RE.findall(str(description or "")):
+            _add(token)
+            if len(collected) >= limit:
+                break
+
+    return collected[:limit]

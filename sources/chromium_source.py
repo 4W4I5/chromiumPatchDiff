@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import time
 from typing import Any, Callable
+from urllib.parse import quote
 
 from clients.http_client import HttpClient
 from config import CompareComponent, ComparePlatform, PipelineConfig, ReleaseChannel
@@ -250,6 +251,7 @@ class ChromiumMirrorSource:
         path_prefixes: list[str] | None = None,
         file_extensions: list[str] | None = None,
         keyword: str = "",
+        keywords: list[str] | None = None,
         max_results: int = 250,
     ) -> tuple[dict[str, Any], list[str]]:
         warnings: list[str] = []
@@ -278,7 +280,7 @@ class ChromiumMirrorSource:
 
         normalized_prefixes = [item.strip().lower().lstrip("/") for item in (path_prefixes or []) if item.strip()]
         normalized_extensions = [self._normalize_extension(item) for item in (file_extensions or []) if item.strip()]
-        normalized_keyword = keyword.strip().lower()
+        normalized_keywords = self._normalize_keywords(keyword=keyword, keywords=keywords)
 
         if platform != ComparePlatform.ALL:
             warnings.append("Platform filtering uses commit-message heuristics for commits and path heuristics for changed files.")
@@ -295,7 +297,7 @@ class ChromiumMirrorSource:
 
             if platform != ComparePlatform.ALL and not self._message_matches_platform(message, platform):
                 continue
-            if normalized_keyword and normalized_keyword not in f"{title} {message}".lower():
+            if normalized_keywords and not self._matches_any_keyword(f"{title} {message}".lower(), normalized_keywords):
                 continue
 
             compare_commits.append(
@@ -341,8 +343,13 @@ class ChromiumMirrorSource:
                 if suffix not in normalized_extensions:
                     continue
 
-            if normalized_keyword and normalized_keyword not in f"{lowered_filename}\n{patch.lower()}":
+            if normalized_keywords and not self._matches_any_keyword(f"{lowered_filename}\n{patch.lower()}", normalized_keywords):
                 continue
+
+            normalized_name = filename.strip().lstrip("/")
+            head_raw_url = str(file_payload.get("raw_url", "") or "").strip()
+            if not head_raw_url:
+                head_raw_url = self._build_raw_url(self._config.github_repo, head_version, normalized_name)
 
             compare_files.append(
                 {
@@ -352,7 +359,10 @@ class ChromiumMirrorSource:
                     "deletions": int(file_payload.get("deletions", 0) or 0),
                     "changes": int(file_payload.get("changes", 0) or 0),
                     "blob_url": str(file_payload.get("blob_url", "") or ""),
-                    "raw_url": str(file_payload.get("raw_url", "") or ""),
+                    "raw_url": head_raw_url,
+                    "base_raw_url": self._build_raw_url(self._config.github_repo, base_version, normalized_name),
+                    "head_raw_url": head_raw_url,
+                    "file_key": self._build_file_key(component, normalized_name),
                     "patch": patch,
                 }
             )
@@ -372,6 +382,7 @@ class ChromiumMirrorSource:
             "truncated": bool(payload.get("files") and len(raw_files) >= 300),
             "platform": platform.value,
             "component": component.value,
+            "keywords": normalized_keywords,
             "release_channel": "",
         }, warnings
 
@@ -589,6 +600,35 @@ class ChromiumMirrorSource:
         if not trimmed.startswith("."):
             return f".{trimmed}"
         return trimmed
+
+    def _normalize_keywords(self, keyword: str, keywords: list[str] | None) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+
+        for item in [keyword, *(keywords or [])]:
+            token = str(item or "").strip().lower()
+            if not token:
+                continue
+            if token in seen:
+                continue
+            seen.add(token)
+            normalized.append(token)
+
+        return normalized
+
+    def _matches_any_keyword(self, haystack: str, keywords: list[str]) -> bool:
+        return any(token in haystack for token in keywords)
+
+    def _build_raw_url(self, repo: str, ref: str, filename: str) -> str:
+        safe_repo = str(repo or "").strip("/")
+        safe_ref = quote(str(ref or "").strip(), safe="")
+        safe_filename = quote(str(filename or "").strip().lstrip("/"), safe="/")
+        if not safe_repo or not safe_ref or not safe_filename:
+            return ""
+        return f"https://raw.githubusercontent.com/{safe_repo}/{safe_ref}/{safe_filename}"
+
+    def _build_file_key(self, component: CompareComponent, filename: str) -> str:
+        return f"{component.value}:{str(filename or '').strip().lower()}"
 
     def _version_sort_key(self, version: str) -> tuple[int, int, int, int]:
         try:

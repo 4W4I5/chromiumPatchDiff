@@ -82,6 +82,11 @@ class PipelineConfig:
     local_cvelist_path: str = ""
     local_cvelist_recent_years: int = 25
 
+    source_content_enabled: bool = True
+    source_content_cache_file: str = ".cache/source_contents.json"
+    source_content_cache_ttl_seconds: int = 21600
+    source_content_max_bytes: int = 350000
+
     @classmethod
     def from_env(cls) -> "PipelineConfig":
         mode_value = os.getenv("CVE_SOURCE_MODE", SourceMode.AUTO.value).strip().lower()
@@ -125,6 +130,10 @@ class PipelineConfig:
             local_cvelist_enabled=_env_bool("LOCAL_CVELIST_ENABLED", True),
             local_cvelist_path=os.getenv("LOCAL_CVELIST_PATH", "").strip(),
             local_cvelist_recent_years=max(0, int(os.getenv("LOCAL_CVELIST_RECENT_YEARS", "25"))),
+            source_content_enabled=_env_bool("SOURCE_CONTENT_ENABLED", True),
+            source_content_cache_file=os.getenv("SOURCE_CONTENT_CACHE_FILE", ".cache/source_contents.json").strip(),
+            source_content_cache_ttl_seconds=max(60, int(os.getenv("SOURCE_CONTENT_CACHE_TTL_SECONDS", "21600"))),
+            source_content_max_bytes=max(10000, int(os.getenv("SOURCE_CONTENT_MAX_BYTES", "350000"))),
         )
 
     @property
