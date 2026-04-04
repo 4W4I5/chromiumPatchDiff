@@ -5,6 +5,7 @@ import binascii
 import json
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.parse import quote
 
@@ -313,12 +314,20 @@ class ChromiumMirrorSource:
             f"/compare/{normalized_base_ref}...{normalized_head_ref}"
         )
         self._throttle_github_requests()
-        status, payload, error = self._http.try_get_json(
+        status, payload, response_headers, error = self._http.try_get_json_with_headers(
             endpoint,
             headers=self._config.github_headers,
         )
 
         if status >= 400 or not isinstance(payload, dict):
+            compare_rate_limit_warning = ""
+            if self._is_github_rate_limit_response(status=status, payload=payload, error=error):
+                compare_rate_limit_warning = self._build_compare_rate_limit_warning(
+                    base_ref=normalized_base_ref,
+                    head_ref=normalized_head_ref,
+                    response_headers=response_headers,
+                )
+
             if component == CompareComponent.PDFIUM:
                 googlesource_payload, googlesource_error = self._get_pdfium_googlesource_compare_payload(
                     base_ref=normalized_base_ref,
@@ -327,6 +336,8 @@ class ChromiumMirrorSource:
                 if isinstance(googlesource_payload, dict):
                     payload = googlesource_payload
                 else:
+                    if compare_rate_limit_warning:
+                        warnings.append(compare_rate_limit_warning)
                     warnings.append(
                         "GitHub compare failed for range "
                         f"{normalized_base_ref}...{normalized_head_ref}: {error}; "
@@ -359,7 +370,10 @@ class ChromiumMirrorSource:
                         "release_channel": "",
                     }, warnings
             else:
-                warnings.append(f"GitHub compare failed for range {normalized_base_ref}...{normalized_head_ref}: {error}")
+                if compare_rate_limit_warning:
+                    warnings.append(compare_rate_limit_warning)
+                else:
+                    warnings.append(f"GitHub compare failed for range {normalized_base_ref}...{normalized_head_ref}: {error}")
                 return {
                     "status": "error",
                     "commits": [],
@@ -916,6 +930,74 @@ class ChromiumMirrorSource:
             score = min(score, 0.12)
 
         return round(max(0.05, min(score, 1.0)), 3)
+
+    def _get_header_value(self, headers: dict[str, str], key: str) -> str:
+        target = str(key or "").strip().lower()
+        if not target:
+            return ""
+        for header_name, header_value in (headers or {}).items():
+            if str(header_name or "").strip().lower() == target:
+                return str(header_value or "").strip()
+        return ""
+
+    def _format_wait_seconds(self, wait_seconds: int) -> str:
+        total = max(0, int(wait_seconds))
+        hours = total // 3600
+        minutes = (total % 3600) // 60
+        seconds = total % 60
+
+        parts: list[str] = []
+        if hours:
+            parts.append(f"{hours}h")
+        if minutes or hours:
+            parts.append(f"{minutes}m")
+        parts.append(f"{seconds}s")
+        return " ".join(parts)
+
+    def _build_compare_rate_limit_warning(
+        self,
+        *,
+        base_ref: str,
+        head_ref: str,
+        response_headers: dict[str, str],
+    ) -> str:
+        now_epoch = int(time.time())
+        retry_after_seconds = 0
+        reset_epoch = 0
+
+        retry_after_raw = self._get_header_value(response_headers, "retry-after")
+        if retry_after_raw:
+            try:
+                retry_after_seconds = max(0, int(float(retry_after_raw)))
+            except (TypeError, ValueError):
+                retry_after_seconds = 0
+
+        reset_raw = self._get_header_value(response_headers, "x-ratelimit-reset")
+        if reset_raw:
+            try:
+                reset_epoch = max(0, int(float(reset_raw)))
+            except (TypeError, ValueError):
+                reset_epoch = 0
+
+        if retry_after_seconds > 0:
+            retry_epoch = now_epoch + retry_after_seconds
+        elif reset_epoch > now_epoch:
+            retry_epoch = reset_epoch
+        elif reset_epoch > 0:
+            retry_epoch = reset_epoch
+        else:
+            # Unauthenticated GitHub requests are hourly; use this conservative default.
+            retry_epoch = now_epoch + 3600
+
+        wait_seconds = max(0, retry_epoch - now_epoch)
+        retry_at_utc = datetime.fromtimestamp(retry_epoch, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+        wait_human = self._format_wait_seconds(wait_seconds)
+
+        return (
+            "GitHub compare is rate-limited for range "
+            f"{base_ref}...{head_ref}. Wait about {wait_human} and retry at {retry_at_utc} UTC. "
+            "Set GITHUB_TOKEN to raise API limits."
+        )
 
     def _parse_json_with_optional_xssi(self, text: str) -> Any:
         payload = str(text or "")

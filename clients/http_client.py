@@ -41,6 +41,20 @@ class HttpClient:
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
     ) -> tuple[int, Any | None, str | None]:
+        status, payload, _response_headers, error = self.try_get_json_with_headers(
+            url,
+            params=params,
+            headers=headers,
+        )
+        return status, payload, error
+
+    def try_get_json_with_headers(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, Any | None, dict[str, str], str | None]:
         try:
             response = self._session.get(
                 url,
@@ -49,7 +63,7 @@ class HttpClient:
                 timeout=self._config.timeout_seconds,
             )
         except requests.RequestException as exc:
-            return 0, None, str(exc)
+            return 0, None, {}, str(exc)
 
         try:
             payload = response.json()
@@ -57,10 +71,10 @@ class HttpClient:
             payload = None
 
         if response.ok:
-            return response.status_code, payload, None
+            return response.status_code, payload, dict(response.headers), None
 
         detail = payload if isinstance(payload, dict) else response.text[:300]
-        return response.status_code, payload, f"HTTP {response.status_code}: {detail}"
+        return response.status_code, payload, dict(response.headers), f"HTTP {response.status_code}: {detail}"
 
     def try_get_text(
         self,
