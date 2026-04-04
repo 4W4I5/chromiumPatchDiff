@@ -86,8 +86,11 @@ def get_job_file_content(job_id: str, payload: SourceFileContentRequest, request
     component_item, file_item = resolved
     repo = str(component_item.get("repo", "") or "").strip()
     filename = str(file_item.get("filename", "") or "").strip()
-    base_version = str(compare.get("base_version", "") or "").strip()
-    head_version = str(compare.get("head_version", "") or "").strip()
+    compare_base_version = str(compare.get("base_version", "") or "").strip()
+    compare_head_version = str(compare.get("head_version", "") or "").strip()
+    resolved_refs = component_item.get("resolved_refs", {}) if isinstance(component_item.get("resolved_refs"), dict) else {}
+    base_version = str(resolved_refs.get("base", "") or compare_base_version).strip()
+    head_version = str(resolved_refs.get("head", "") or compare_head_version).strip()
 
     if not repo or not filename or not base_version or not head_version:
         raise HTTPException(status_code=400, detail="Compare payload is missing repo/path/version metadata for this file.")

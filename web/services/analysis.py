@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
+import re
 from typing import Any, Callable
 
 from chrome import Chrome
@@ -10,6 +11,7 @@ from config import CompareComponent, PipelineConfig, resolve_component_repo
 from models import CveRecord
 from pipeline.orchestrator import EnrichmentOrchestrator
 from sources.chrome_releases_source import ChromeReleasesSource
+from sources.component_ref_resolver import ChromiumComponentRefResolver
 from sources.chromium_source import ChromiumMirrorSource
 from sources.cve_utils import infer_focus_keywords
 from web.schemas import AnalysisRequest, InputMode
@@ -131,6 +133,11 @@ class AnalysisService:
         auto_keywords = infer_focus_keywords(cve_record.title, cve_record.description)
         manual_keywords = self._split_keywords(payload.keyword)
         effective_keywords = self._merge_keywords(auto_keywords, manual_keywords)
+        evidence_tokens = self._build_security_evidence_tokens(
+            cve_id=normalized_cve_id,
+            references=cve_record.references,
+            description=cve_record.description,
+        )
         effective_components = self._resolve_effective_components(payload)
 
         progress(52, "Running filtered compare across selected components")
@@ -140,7 +147,13 @@ class AnalysisService:
             payload=payload,
             components=effective_components,
             keyword=payload.keyword,
-            keywords=effective_keywords,
+            hard_keywords=manual_keywords,
+            soft_keywords=auto_keywords,
+            evidence_tokens=evidence_tokens,
+            strict_commit_platform=False,
+            strict_file_platform=False,
+            soft_file_focus=True,
+            min_commit_confidence=0.6,
             progress=progress,
             start_progress=52,
             end_progress=88,
@@ -156,7 +169,7 @@ class AnalysisService:
         warnings.extend(patched_warnings)
         warnings.extend(predecessor_warnings)
         warnings.extend(compare_warnings)
-        warnings.append("Detailed CVE context and NVD enrichment deferred until DOCX export.")
+        notes = ["Detailed CVE context and NVD enrichment deferred until DOCX export."]
 
         provenance: list[str] = []
         provenance.extend(cve_provenance)
@@ -198,6 +211,7 @@ class AnalysisService:
                 "keywords": effective_keywords,
             },
             "compare": compare_result,
+            "notes": notes,
             "warnings": self._dedupe(warnings),
             "provenance": self._dedupe(provenance),
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -242,7 +256,13 @@ class AnalysisService:
             payload=payload,
             components=effective_components,
             keyword=payload.keyword,
-            keywords=manual_keywords,
+            hard_keywords=manual_keywords,
+            soft_keywords=[],
+            evidence_tokens=[],
+            strict_commit_platform=True,
+            strict_file_platform=True,
+            soft_file_focus=False,
+            min_commit_confidence=0.0,
             progress=progress,
             start_progress=42,
             end_progress=88,
@@ -253,7 +273,7 @@ class AnalysisService:
         warnings: list[str] = []
         warnings.extend(predecessor_warnings)
         warnings.extend(compare_warnings)
-        warnings.append("Detailed CVE context and NVD enrichment deferred until DOCX export.")
+        notes = ["Detailed CVE context and NVD enrichment deferred until DOCX export."]
 
         result = {
             "input_mode": payload.input_mode.value,
@@ -288,6 +308,7 @@ class AnalysisService:
                 "keywords": manual_keywords,
             },
             "compare": compare_result,
+            "notes": notes,
             "warnings": self._dedupe(warnings),
             "provenance": ["chromium-github-mirror", "chromiumdash"],
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -410,7 +431,13 @@ class AnalysisService:
         payload: AnalysisRequest,
         components: list[CompareComponent] | None,
         keyword: str,
-        keywords: list[str],
+        hard_keywords: list[str],
+        soft_keywords: list[str],
+        evidence_tokens: list[str],
+        strict_commit_platform: bool,
+        strict_file_platform: bool,
+        soft_file_focus: bool,
+        min_commit_confidence: float,
         progress: Callable[[int, str], None],
         start_progress: int,
         end_progress: int,
@@ -422,10 +449,64 @@ class AnalysisService:
         if not selected_components:
             raise ValueError("At least one component must be selected for compare.")
 
+        resolver = ChromiumComponentRefResolver(HttpClient(self._config), self._config)
+        resolved_refs, resolution_warnings = resolver.resolve_component_refs(
+            base_version=base_version,
+            head_version=head_version,
+            components=selected_components,
+        )
+        warnings.extend(resolution_warnings)
+
         progress_span = max(1, end_progress - start_progress)
 
         for index, component in enumerate(selected_components, start=1):
             repo = resolve_component_repo(component)
+            resolved_ref = resolved_refs.get(component)
+
+            if resolved_ref is None:
+                component_warning = (
+                    "Component compare skipped because base/head refs could not be resolved from Chromium DEPS."
+                )
+                warnings.append(f"[{component.value}] {component_warning}")
+                component_results.append(
+                    {
+                        "component": component.value,
+                        "status": "error",
+                        "repo": repo,
+                        "compare_url": "",
+                        "commit_count": 0,
+                        "file_count": 0,
+                        "compare_meta": {
+                            "total_commits": 0,
+                            "ahead_by": 0,
+                            "behind_by": 0,
+                            "total_files": 0,
+                            "truncated": False,
+                        },
+                        "filter_metrics": {
+                            "total_files_from_api": 0,
+                            "after_platform_filter": 0,
+                            "after_path_prefix_filter": 0,
+                            "after_extension_filter": 0,
+                            "after_keyword_filter": 0,
+                            "after_soft_focus_filter": 0,
+                            "commit_confidence_fallback_applied": False,
+                            "soft_file_focus_fallback_applied": False,
+                        },
+                        "resolved_refs": {
+                            "base": "",
+                            "head": "",
+                            "strategy": "unresolved",
+                        },
+                        "warnings": [component_warning],
+                        "commits": [],
+                        "files": [],
+                        "available_directories": [],
+                        "directory_file_counts": [],
+                    }
+                )
+                continue
+
             cfg = replace(self._config)
             cfg.github_repo = repo
 
@@ -434,14 +515,20 @@ class AnalysisService:
 
             source = ChromiumMirrorSource(HttpClient(cfg), cfg)
             compare_payload, compare_warnings = source.get_compare_diff(
-                base_version=base_version,
-                head_version=head_version,
+                base_version=resolved_ref.base_ref,
+                head_version=resolved_ref.head_ref,
                 platform=payload.platform,
                 component=component,
                 path_prefixes=payload.path_prefixes,
                 file_extensions=payload.file_extensions,
                 keyword=keyword,
-                keywords=keywords,
+                keywords=hard_keywords,
+                soft_keywords=soft_keywords,
+                evidence_tokens=evidence_tokens,
+                strict_commit_platform=strict_commit_platform,
+                strict_file_platform=strict_file_platform,
+                soft_file_focus=soft_file_focus,
+                min_commit_confidence=min_commit_confidence,
             )
 
             warnings.extend([f"[{component.value}] {item}" for item in compare_warnings])
@@ -449,20 +536,46 @@ class AnalysisService:
             commits = [asdict(item) for item in compare_payload.get("commits", []) or []]
             files = [item for item in compare_payload.get("files", []) or [] if isinstance(item, dict)]
             component_directories, component_directory_counts = self._extract_directory_hierarchy(files)
+            total_commits_api = int(compare_payload.get("total_commits", 0) or 0)
+            total_files_api = int(compare_payload.get("total_files", 0) or 0)
+            compare_status = str(compare_payload.get("status", "ok") or "ok")
+
+            component_status = "changed"
+            if compare_status == "error":
+                component_status = "error"
+            elif compare_status == "unchanged":
+                component_status = "unchanged"
+            elif total_files_api > 0 and not files:
+                component_status = "filtered_out"
+            elif total_commits_api > 0 and not commits and not files:
+                component_status = "filtered_out"
+            elif total_commits_api == 0 and total_files_api == 0 and not commits and not files:
+                component_status = "unchanged"
+
+            compare_url = ""
+            if component_status not in {"unchanged", "error"}:
+                compare_url = self._build_compare_url(repo, resolved_ref.base_ref, resolved_ref.head_ref)
 
             component_results.append(
                 {
                     "component": component.value,
+                    "status": component_status,
                     "repo": repo,
-                    "compare_url": self._build_compare_url(repo, base_version, head_version),
+                    "compare_url": compare_url,
                     "commit_count": len(commits),
                     "file_count": len(files),
                     "compare_meta": {
-                        "total_commits": int(compare_payload.get("total_commits", 0) or 0),
+                        "total_commits": total_commits_api,
                         "ahead_by": int(compare_payload.get("ahead_by", 0) or 0),
                         "behind_by": int(compare_payload.get("behind_by", 0) or 0),
-                        "total_files": int(compare_payload.get("total_files", 0) or 0),
+                        "total_files": total_files_api,
                         "truncated": bool(compare_payload.get("truncated", False)),
+                    },
+                    "filter_metrics": compare_payload.get("filter_metrics", {}),
+                    "resolved_refs": {
+                        "base": resolved_ref.base_ref,
+                        "head": resolved_ref.head_ref,
+                        "strategy": resolved_ref.strategy,
                     },
                     "warnings": compare_warnings,
                     "commits": commits,
@@ -506,7 +619,14 @@ class AnalysisService:
                     "path_prefixes": payload.path_prefixes,
                     "file_extensions": payload.file_extensions,
                     "keyword": keyword,
-                    "keywords": list(keywords),
+                    "hard_keywords": list(hard_keywords),
+                    "soft_keywords": list(soft_keywords),
+                    "evidence_tokens": list(evidence_tokens),
+                    "strict_commit_platform": bool(strict_commit_platform),
+                    "strict_file_platform": bool(strict_file_platform),
+                    "soft_file_focus": bool(soft_file_focus),
+                    "min_commit_confidence": float(min_commit_confidence),
+                    "keywords": self._merge_keywords(hard_keywords, soft_keywords),
                 },
             },
             warnings,
@@ -551,7 +671,36 @@ class AnalysisService:
 
     def _build_compare_url(self, repo: str, base_version: str, head_version: str) -> str:
         repo_path = repo.strip("/") or "chromium/chromium"
+        if not base_version or not head_version:
+            return ""
+        if str(base_version).strip() == str(head_version).strip():
+            return ""
         return f"https://github.com/{repo_path}/compare/{base_version}...{head_version}"
+
+    def _build_security_evidence_tokens(self, *, cve_id: str, references: list[str], description: str) -> list[str]:
+        tokens = [str(cve_id or "").strip()]
+        issue_ids: set[str] = set()
+
+        for ref in references:
+            for match in re.findall(r"issues\.chromium\.org/issues/(\d+)", str(ref or "")):
+                issue_ids.add(match)
+            for match in re.findall(r"crbug\.com/(\d+)", str(ref or "")):
+                issue_ids.add(match)
+
+        for match in re.findall(r"(?:crbug|bug)\s*[:#/]?\s*(\d{6,})", str(description or ""), flags=re.IGNORECASE):
+            issue_ids.add(match)
+
+        for issue_id in sorted(issue_ids):
+            tokens.extend(
+                [
+                    issue_id,
+                    f"issues.chromium.org/issues/{issue_id}",
+                    f"crbug/{issue_id}",
+                    f"bug:{issue_id}",
+                ]
+            )
+
+        return self._dedupe(tokens)
 
     def _extract_directory_hierarchy(self, files: list[dict[str, Any]]) -> tuple[list[str], list[dict[str, int]]]:
         directory_counts: dict[str, int] = {}

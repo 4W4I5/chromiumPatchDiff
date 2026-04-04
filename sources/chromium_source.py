@@ -12,6 +12,18 @@ from models import CommitEvidence
 
 class ChromiumMirrorSource:
     name = "chromium-github-mirror"
+    _SECURITY_ID_RE = re.compile(
+        r"(CVE-\d{4}-\d{4,7}|issues\.chromium\.org/issues/\d+|crbug(?:\.com|\s*[:/#]?\s*)\d{5,})",
+        flags=re.IGNORECASE,
+    )
+    _AUTOROLLER_HINTS: tuple[str, ...] = (
+        "autoroll",
+        "chrome release autoroll",
+        "rubber stamper",
+        "roll chrome win",
+        "pgo profile",
+        "merge-approval-bypass",
+    )
 
     _PLATFORM_PATH_RULES: dict[ComparePlatform, tuple[str, ...]] = {
         ComparePlatform.WINDOWS: ("win/", "windows/", "_win", "win32", "win64", "platform/win"),
@@ -252,11 +264,49 @@ class ChromiumMirrorSource:
         file_extensions: list[str] | None = None,
         keyword: str = "",
         keywords: list[str] | None = None,
+        soft_keywords: list[str] | None = None,
+        evidence_tokens: list[str] | None = None,
+        strict_commit_platform: bool = True,
+        strict_file_platform: bool = True,
+        soft_file_focus: bool = False,
+        min_commit_confidence: float = 0.0,
         max_results: int = 250,
     ) -> tuple[dict[str, Any], list[str]]:
         warnings: list[str] = []
 
-        endpoint = f"{self._config.github_api_base}/repos/{self._config.github_repo}/compare/{base_version}...{head_version}"
+        normalized_base_ref = str(base_version or "").strip()
+        normalized_head_ref = str(head_version or "").strip()
+        if normalized_base_ref and normalized_head_ref and normalized_base_ref == normalized_head_ref:
+            return {
+                "status": "unchanged",
+                "commits": [],
+                "files": [],
+                "base_ref": normalized_base_ref,
+                "head_ref": normalized_head_ref,
+                "filter_metrics": {
+                    "total_files_from_api": 0,
+                    "after_platform_filter": 0,
+                    "after_path_prefix_filter": 0,
+                    "after_extension_filter": 0,
+                    "after_keyword_filter": 0,
+                    "after_soft_focus_filter": 0,
+                    "commit_confidence_fallback_applied": False,
+                    "soft_file_focus_fallback_applied": False,
+                },
+                "total_commits": 0,
+                "ahead_by": 0,
+                "behind_by": 0,
+                "total_files": 0,
+                "truncated": False,
+                "platform": platform.value,
+                "component": component.value,
+                "release_channel": "",
+            }, warnings
+
+        endpoint = (
+            f"{self._config.github_api_base}/repos/{self._config.github_repo}"
+            f"/compare/{normalized_base_ref}...{normalized_head_ref}"
+        )
         self._throttle_github_requests()
         status, payload, error = self._http.try_get_json(
             endpoint,
@@ -264,10 +314,23 @@ class ChromiumMirrorSource:
         )
 
         if status >= 400 or not isinstance(payload, dict):
-            warnings.append(f"GitHub compare failed for range {base_version}...{head_version}: {error}")
+            warnings.append(f"GitHub compare failed for range {normalized_base_ref}...{normalized_head_ref}: {error}")
             return {
+                "status": "error",
                 "commits": [],
                 "files": [],
+                "base_ref": normalized_base_ref,
+                "head_ref": normalized_head_ref,
+                "filter_metrics": {
+                    "total_files_from_api": 0,
+                    "after_platform_filter": 0,
+                    "after_path_prefix_filter": 0,
+                    "after_extension_filter": 0,
+                    "after_keyword_filter": 0,
+                    "after_soft_focus_filter": 0,
+                    "commit_confidence_fallback_applied": False,
+                    "soft_file_focus_fallback_applied": False,
+                },
                 "total_commits": 0,
                 "ahead_by": 0,
                 "behind_by": 0,
@@ -280,44 +343,98 @@ class ChromiumMirrorSource:
 
         normalized_prefixes = [item.strip().lower().lstrip("/") for item in (path_prefixes or []) if item.strip()]
         normalized_extensions = [self._normalize_extension(item) for item in (file_extensions or []) if item.strip()]
-        normalized_keywords = self._normalize_keywords(keyword=keyword, keywords=keywords)
+        normalized_hard_keywords = self._normalize_keywords(keyword=keyword, keywords=keywords)
+        normalized_soft_keywords = self._normalize_keywords(keyword="", keywords=soft_keywords)
+        normalized_evidence_tokens = self._normalize_evidence_tokens(evidence_tokens)
+        try:
+            min_commit_confidence = float(min_commit_confidence)
+        except (TypeError, ValueError):
+            min_commit_confidence = 0.0
+        min_commit_confidence = max(0.0, min(min_commit_confidence, 1.0))
 
-        if platform != ComparePlatform.ALL:
-            warnings.append("Platform filtering uses commit-message heuristics for commits and path heuristics for changed files.")
+        def _collect_compare_commits() -> list[CommitEvidence]:
+            items: list[CommitEvidence] = []
+            for item in payload.get("commits", []) or []:
+                if not isinstance(item, dict):
+                    continue
 
-        compare_commits: list[CommitEvidence] = []
-        for item in payload.get("commits", []) or []:
-            if not isinstance(item, dict):
-                continue
+                sha = item.get("sha", "")
+                commit = item.get("commit", {}) or {}
+                message = commit.get("message", "") or ""
+                title = (message.splitlines() or [""])[0]
+                combined = f"{title} {message}"
 
-            sha = item.get("sha", "")
-            commit = item.get("commit", {}) or {}
-            message = commit.get("message", "") or ""
-            title = (message.splitlines() or [""])[0]
+                platform_match = self._message_matches_platform(message, platform)
+                if strict_commit_platform and platform != ComparePlatform.ALL and not platform_match:
+                    continue
 
-            if platform != ComparePlatform.ALL and not self._message_matches_platform(message, platform):
-                continue
-            if normalized_keywords and not self._matches_any_keyword(f"{title} {message}".lower(), normalized_keywords):
-                continue
+                hard_keyword_match = True
+                if normalized_hard_keywords:
+                    hard_keyword_match = self._matches_any_keyword(combined.lower(), normalized_hard_keywords)
+                if not hard_keyword_match:
+                    continue
 
-            compare_commits.append(
-                CommitEvidence(
-                    sha=sha,
-                    url=item.get("html_url", ""),
+                confidence = self._score_compare_commit(
                     title=title,
                     message=message,
-                    author=((commit.get("author") or {}).get("name") or ""),
-                    date=((commit.get("author") or {}).get("date") or ""),
-                    confidence=0.6,
-                    source=f"github:{self._config.github_repo}:compare",
+                    platform_match=platform_match,
+                    strict_commit_platform=strict_commit_platform,
+                    normalized_soft_keywords=normalized_soft_keywords,
+                    normalized_evidence_tokens=normalized_evidence_tokens,
                 )
+
+                items.append(
+                    CommitEvidence(
+                        sha=sha,
+                        url=item.get("html_url", ""),
+                        title=title,
+                        message=message,
+                        author=((commit.get("author") or {}).get("name") or ""),
+                        date=((commit.get("author") or {}).get("date") or ""),
+                        confidence=confidence,
+                        source=f"github:{self._config.github_repo}:compare",
+                    )
+                )
+            return items
+
+        compare_commits = _collect_compare_commits()
+
+        if compare_commits:
+            compare_commits.sort(
+                key=lambda item: (item.confidence, str(item.date or "")),
+                reverse=True,
             )
-            if len(compare_commits) >= max_results:
+
+            commit_confidence_fallback_applied = False
+            if min_commit_confidence > 0:
+                above_threshold = [
+                    item for item in compare_commits if float(item.confidence or 0.0) >= min_commit_confidence
+                ]
+                if above_threshold:
+                    compare_commits = above_threshold
+                elif normalized_soft_keywords or normalized_evidence_tokens:
+                    fallback_count = min(max_results, 40)
+                    commit_confidence_fallback_applied = True
+                    if len(compare_commits) > fallback_count:
+                        compare_commits = compare_commits[:fallback_count]
+            else:
+                commit_confidence_fallback_applied = False
+
+            if len(compare_commits) > max_results:
                 warnings.append(f"Compare commit list truncated at {max_results} entries.")
-                break
+                compare_commits = compare_commits[:max_results]
+        else:
+            commit_confidence_fallback_applied = False
 
         compare_files: list[dict[str, Any]] = []
+        candidate_files: list[tuple[dict[str, Any], bool]] = []
         raw_files = payload.get("files", []) or []
+        files_after_platform_filter = 0
+        files_after_path_prefix_filter = 0
+        files_after_extension_filter = 0
+        files_after_keyword_filter = 0
+        files_after_soft_focus_filter = 0
+        soft_file_focus_fallback_applied = False
         for file_payload in raw_files:
             if not isinstance(file_payload, dict):
                 continue
@@ -326,8 +443,10 @@ class ChromiumMirrorSource:
             patch = str(file_payload.get("patch", "") or "")
             lowered_filename = filename.lower().lstrip("/")
 
-            if platform != ComparePlatform.ALL and not self._path_matches_platform(lowered_filename, platform):
+            path_matches_platform = self._path_matches_platform(lowered_filename, platform)
+            if platform != ComparePlatform.ALL and strict_file_platform and not path_matches_platform:
                 continue
+            files_after_platform_filter += 1
 
             if normalized_prefixes:
                 prefix_match = any(
@@ -335,6 +454,7 @@ class ChromiumMirrorSource:
                 )
                 if not prefix_match:
                     continue
+            files_after_path_prefix_filter += 1
 
             if normalized_extensions:
                 suffix = ""
@@ -342,39 +462,91 @@ class ChromiumMirrorSource:
                     suffix = "." + lowered_filename.rsplit(".", 1)[1]
                 if suffix not in normalized_extensions:
                     continue
+            files_after_extension_filter += 1
 
-            if normalized_keywords and not self._matches_any_keyword(f"{lowered_filename}\n{patch.lower()}", normalized_keywords):
+            file_haystack = f"{lowered_filename}\n{patch.lower()}"
+            if normalized_hard_keywords and not self._matches_any_keyword(file_haystack, normalized_hard_keywords):
                 continue
+            files_after_keyword_filter += 1
+
+            soft_focus_match = self._matches_any_keyword(file_haystack, normalized_soft_keywords) if normalized_soft_keywords else False
+            evidence_match = self._matches_any_evidence_token(file_haystack, normalized_evidence_tokens)
 
             normalized_name = filename.strip().lstrip("/")
             head_raw_url = str(file_payload.get("raw_url", "") or "").strip()
             if not head_raw_url:
-                head_raw_url = self._build_raw_url(self._config.github_repo, head_version, normalized_name)
+                head_raw_url = self._build_raw_url(self._config.github_repo, normalized_head_ref, normalized_name)
 
-            compare_files.append(
-                {
-                    "filename": filename,
-                    "status": str(file_payload.get("status", "") or ""),
-                    "additions": int(file_payload.get("additions", 0) or 0),
-                    "deletions": int(file_payload.get("deletions", 0) or 0),
-                    "changes": int(file_payload.get("changes", 0) or 0),
-                    "blob_url": str(file_payload.get("blob_url", "") or ""),
-                    "raw_url": head_raw_url,
-                    "base_raw_url": self._build_raw_url(self._config.github_repo, base_version, normalized_name),
-                    "head_raw_url": head_raw_url,
-                    "file_key": self._build_file_key(component, normalized_name),
-                    "patch": patch,
-                }
+            candidate_files.append(
+                (
+                    {
+                        "filename": filename,
+                        "status": str(file_payload.get("status", "") or ""),
+                        "additions": int(file_payload.get("additions", 0) or 0),
+                        "deletions": int(file_payload.get("deletions", 0) or 0),
+                        "changes": int(file_payload.get("changes", 0) or 0),
+                        "blob_url": str(file_payload.get("blob_url", "") or ""),
+                        "raw_url": head_raw_url,
+                        "base_raw_url": self._build_raw_url(self._config.github_repo, normalized_base_ref, normalized_name),
+                        "head_raw_url": head_raw_url,
+                        "file_key": self._build_file_key(component, normalized_name),
+                        "patch": patch,
+                    },
+                    soft_focus_match or evidence_match,
+                )
             )
 
+        if soft_file_focus and (normalized_soft_keywords or normalized_evidence_tokens):
+            focused_files = [item for item, matches_focus in candidate_files if matches_focus]
+            if focused_files:
+                compare_files = focused_files
+                files_after_soft_focus_filter = len(compare_files)
+            else:
+                compare_files = [item for item, _ in candidate_files]
+                files_after_soft_focus_filter = 0
+                if compare_files:
+                    soft_file_focus_fallback_applied = True
+        else:
+            compare_files = [item for item, _ in candidate_files]
+            files_after_soft_focus_filter = len(compare_files)
+
+        total_commits = int(payload.get("total_commits", 0) or 0)
         if not compare_commits:
-            warnings.append(f"GitHub compare returned no commits for range {base_version}...{head_version}.")
-        if platform != ComparePlatform.ALL and not compare_files:
-            warnings.append(f"No changed files matched platform filter '{platform.value}'.")
+            if total_commits > 0:
+                warnings.append(
+                    "No commits matched active filters/signals "
+                    f"(total_commits={total_commits}, strict_commit_platform={strict_commit_platform}, "
+                    f"hard_keywords={len(normalized_hard_keywords)}, soft_keywords={len(normalized_soft_keywords)}, "
+                    f"evidence_tokens={len(normalized_evidence_tokens)})."
+                )
+            else:
+                warnings.append(
+                    f"GitHub compare returned no commits for range {normalized_base_ref}...{normalized_head_ref}."
+                )
+        if platform != ComparePlatform.ALL and strict_file_platform and not compare_files:
+            warnings.append(
+                "No changed files matched platform filter "
+                f"'{platform.value}' (total_files={len(raw_files)}, after_platform={files_after_platform_filter}, "
+                f"after_path_prefix={files_after_path_prefix_filter}, after_extension={files_after_extension_filter}, "
+                f"after_keyword={files_after_keyword_filter}, after_soft_focus={files_after_soft_focus_filter})."
+            )
 
         return {
+            "status": "ok",
             "commits": compare_commits,
             "files": compare_files,
+            "base_ref": normalized_base_ref,
+            "head_ref": normalized_head_ref,
+            "filter_metrics": {
+                "total_files_from_api": len(raw_files),
+                "after_platform_filter": files_after_platform_filter,
+                "after_path_prefix_filter": files_after_path_prefix_filter,
+                "after_extension_filter": files_after_extension_filter,
+                "after_keyword_filter": files_after_keyword_filter,
+                "after_soft_focus_filter": files_after_soft_focus_filter,
+                "commit_confidence_fallback_applied": bool(commit_confidence_fallback_applied),
+                "soft_file_focus_fallback_applied": bool(soft_file_focus_fallback_applied),
+            },
             "total_commits": int(payload.get("total_commits", 0) or 0),
             "ahead_by": int(payload.get("ahead_by", 0) or 0),
             "behind_by": int(payload.get("behind_by", 0) or 0),
@@ -382,7 +554,12 @@ class ChromiumMirrorSource:
             "truncated": bool(payload.get("files") and len(raw_files) >= 300),
             "platform": platform.value,
             "component": component.value,
-            "keywords": normalized_keywords,
+            "keywords": normalized_hard_keywords,
+            "soft_keywords": normalized_soft_keywords,
+            "strict_commit_platform": bool(strict_commit_platform),
+            "strict_file_platform": bool(strict_file_platform),
+            "soft_file_focus": bool(soft_file_focus),
+            "min_commit_confidence": min_commit_confidence,
             "release_channel": "",
         }, warnings
 
@@ -616,8 +793,76 @@ class ChromiumMirrorSource:
 
         return normalized
 
+    def _normalize_evidence_tokens(self, evidence_tokens: list[str] | None) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+
+        for item in evidence_tokens or []:
+            token = str(item or "").strip()
+            if not token:
+                continue
+            upper_token = token.upper()
+            if upper_token in seen:
+                continue
+            seen.add(upper_token)
+            normalized.append(upper_token)
+
+        return normalized
+
+    def _matches_any_evidence_token(self, haystack: str, tokens: list[str]) -> bool:
+        if not tokens:
+            return False
+        upper_haystack = str(haystack or "").upper()
+        return any(token in upper_haystack for token in tokens)
+
     def _matches_any_keyword(self, haystack: str, keywords: list[str]) -> bool:
         return any(token in haystack for token in keywords)
+
+    def _score_compare_commit(
+        self,
+        *,
+        title: str,
+        message: str,
+        platform_match: bool,
+        strict_commit_platform: bool,
+        normalized_soft_keywords: list[str],
+        normalized_evidence_tokens: list[str],
+    ) -> float:
+        title_text = str(title or "")
+        message_text = str(message or "")
+        combined = f"{title_text}\n{message_text}"
+        lowered_title = title_text.lower()
+        lowered_message = message_text.lower()
+        lowered_combined = combined.lower()
+
+        has_security_identifier = bool(self._SECURITY_ID_RE.search(combined))
+        if has_security_identifier:
+            return 1.0
+
+        if self._matches_any_evidence_token(combined, normalized_evidence_tokens):
+            return 0.95
+
+        score = 0.18
+        if normalized_soft_keywords:
+            title_hits = sum(1 for token in normalized_soft_keywords if token in lowered_title)
+            message_hits = sum(1 for token in normalized_soft_keywords if token in lowered_message)
+            if title_hits > 0 and message_hits > 0:
+                score = 0.78
+            elif title_hits > 0:
+                score = 0.72
+            elif message_hits > 0:
+                score = 0.62
+
+        if platform_match:
+            score += 0.05
+        elif not strict_commit_platform:
+            score -= 0.05
+
+        is_autoroller = any(hint in lowered_combined for hint in self._AUTOROLLER_HINTS)
+        if is_autoroller:
+            score = min(score, 0.12)
+
+        return round(max(0.05, min(score, 1.0)), 3)
 
     def _build_raw_url(self, repo: str, ref: str, filename: str) -> str:
         safe_repo = str(repo or "").strip("/")

@@ -39,6 +39,16 @@ _FOCUS_STOPWORDS = {
     "vulnerability",
     "chrome",
     "chromium",
+    "google",
+    "prior",
+    "allowed",
+    "remote",
+    "attacker",
+    "perform",
+    "crafted",
+    "page",
+    "html",
+    "javascript",
 }
 
 

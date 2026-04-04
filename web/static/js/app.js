@@ -16,6 +16,8 @@ const releaseBlogNode = document.getElementById("release-blog");
 const compareNode = document.getElementById("compare-results");
 const cveNode = document.getElementById("cve-details");
 const rawNode = document.getElementById("raw-json");
+const copyRawPayloadBtn = document.getElementById("copy-raw-payload");
+const copyRawFeedbackNode = document.getElementById("copy-raw-feedback");
 const downloadDocxBtn = document.getElementById("download-docx");
 const pathPrefixesInput = document.getElementById("path-prefixes");
 const directoryCatalogNode = document.getElementById("directory-catalog");
@@ -30,6 +32,7 @@ let availableVersions = [];
 let versionsLoaded = false;
 let latestRequestPayload = null;
 const fullSourceCache = new Map();
+let copyRawFeedbackTimer = null;
 
 modeSelect.addEventListener("change", () => {
   const mode = modeSelect.value;
@@ -140,6 +143,24 @@ downloadDocxBtn.addEventListener("click", async () => {
     downloadDocxBtn.disabled = !latestResult;
   }
 });
+
+if (copyRawPayloadBtn) {
+  copyRawPayloadBtn.addEventListener("click", async () => {
+    const rawText = String((rawNode && rawNode.textContent) || "").trim();
+    if (!rawText || rawText === "No result yet.") {
+      setCopyRawFeedback("Nothing to copy yet.", true);
+      return;
+    }
+
+    const copied = await copyTextToClipboard(rawText);
+    if (copied) {
+      setCopyRawFeedback("Raw payload copied to clipboard.");
+      return;
+    }
+
+    setCopyRawFeedback("Clipboard copy failed. Select the payload and copy manually.", true);
+  });
+}
 
 function isAdvancedPanelVisible() {
   return !!advancedPanel && !advancedPanel.classList.contains("hidden");
@@ -346,6 +367,67 @@ function parseCsv(value) {
     .filter(Boolean);
 }
 
+async function copyTextToClipboard(text) {
+  const value = String(text || "");
+  if (!value) {
+    return false;
+  }
+
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch (_error) {
+      // Fallback to execCommand path below.
+    }
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch (_error) {
+    copied = false;
+  }
+
+  document.body.removeChild(textarea);
+  return copied;
+}
+
+function setCopyRawFeedback(message, isError = false) {
+  if (!copyRawFeedbackNode) {
+    return;
+  }
+
+  copyRawFeedbackNode.textContent = String(message || "");
+  copyRawFeedbackNode.classList.remove("hidden", "copy-feedback-error");
+  if (isError) {
+    copyRawFeedbackNode.classList.add("copy-feedback-error");
+  }
+
+  if (copyRawFeedbackTimer !== null) {
+    window.clearTimeout(copyRawFeedbackTimer);
+  }
+
+  copyRawFeedbackTimer = window.setTimeout(() => {
+    if (copyRawFeedbackNode) {
+      copyRawFeedbackNode.classList.add("hidden");
+      copyRawFeedbackNode.textContent = "";
+      copyRawFeedbackNode.classList.remove("copy-feedback-error");
+    }
+    copyRawFeedbackTimer = null;
+  }, 2600);
+}
+
 function startPolling(jobId) {
   const poll = async () => {
     try {
@@ -406,6 +488,18 @@ function resetView() {
   compareNode.innerHTML = "";
   cveNode.innerHTML = "";
   rawNode.textContent = "No result yet.";
+  if (copyRawPayloadBtn) {
+    copyRawPayloadBtn.disabled = true;
+  }
+  if (copyRawFeedbackNode) {
+    copyRawFeedbackNode.classList.add("hidden");
+    copyRawFeedbackNode.textContent = "";
+    copyRawFeedbackNode.classList.remove("copy-feedback-error");
+  }
+  if (copyRawFeedbackTimer !== null) {
+    window.clearTimeout(copyRawFeedbackTimer);
+    copyRawFeedbackTimer = null;
+  }
   downloadDocxBtn.disabled = true;
 
   if (effectiveFocusNode) {
@@ -429,10 +523,21 @@ function renderError(errorText) {
   li.textContent = String(errorText || "Unknown error");
   warningsNode.appendChild(li);
   rawNode.textContent = String(errorText || "Unknown error");
+  if (copyRawPayloadBtn) {
+    copyRawPayloadBtn.disabled = true;
+  }
 }
 
 function renderResult(result) {
   rawNode.textContent = JSON.stringify(result, null, 2);
+  if (copyRawPayloadBtn) {
+    copyRawPayloadBtn.disabled = false;
+  }
+  if (copyRawFeedbackNode) {
+    copyRawFeedbackNode.classList.add("hidden");
+    copyRawFeedbackNode.textContent = "";
+    copyRawFeedbackNode.classList.remove("copy-feedback-error");
+  }
   renderSummary(result);
   renderEffectiveFocus(result);
   renderWarnings(result.warnings || []);

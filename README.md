@@ -17,6 +17,7 @@ This project lets you run analysis by either CVE ID or Chromium version, then co
   - Chooses a base/head range from those links when available.
   - Falls back to metadata-driven version resolution when needed.
 - Compares selected components (Chrome, Pdfium, Skia, V8) using GitHub compare data.
+- Resolves Pdfium/Skia/V8 compare refs from Chromium DEPS pins so non-Chrome components use valid upstream SHAs.
 - Produces directory taxonomy for changed files and exposes it for filtering.
 - Generates DOCX reports from completed jobs.
 
@@ -122,9 +123,18 @@ The completed result includes, among other fields:
   - selected_log_range
 - compare
   - components
+    - status (changed | unchanged | filtered_out | error)
+    - resolved_refs (base/head/strategy per component)
+    - filter_metrics (stage-by-stage file filtering counters)
   - available_directories
   - directory_file_counts
   - filters
+- notes (informational pipeline notes, such as deferred enrichment)
+
+Filter behavior notes:
+- `keyword` / manual keywords are treated as hard filters.
+- Auto CVE focus keywords are treated as soft ranking signals.
+- In CVE mode with platform selected, commit/file platform matching is relaxed to a ranking signal by default, then CVE soft-focus file matching is applied with fallback to hard-filtered files when needed.
 - warnings
 - provenance
 
