@@ -86,7 +86,7 @@
             <div class="component-grid">
               {% for component in components %}
               <label>
-                <input type="checkbox" name="components" value="{{ component.value }}" {% if component.value == "chrome" %}checked{% endif %} />
+                <input type="checkbox" name="components" value="{{ component.value }}" {% if component.value == "chrome" %}checked{% endif %} {% if component.value == "pdfium" %}checked{% endif %} {% if component.value == "v8" %}checked{% endif %} {% if component.value == "skia" %}checked{% endif %} />
                 <span>{{ component.label }}</span>
               </label>
               {% endfor %}
