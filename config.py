@@ -35,7 +35,7 @@ class ReleaseChannel(str, Enum):
 
 COMPONENT_REPO_MAP: dict[CompareComponent, str] = {
     CompareComponent.CHROME: "chromium/chromium",
-    CompareComponent.PDFIUM: "pdfium/pdfium",
+    CompareComponent.PDFIUM: "chromium/pdfium",
     CompareComponent.SKIA: "google/skia",
     CompareComponent.V8: "v8/v8",
 }

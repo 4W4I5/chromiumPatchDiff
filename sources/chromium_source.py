@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import re
 import time
 from typing import Any, Callable
@@ -37,6 +40,7 @@ class ChromiumMirrorSource:
         ComparePlatform.MACOS: ("mac", "macos", "darwin"),
         ComparePlatform.ANDROID: ("android", "play services", "chromium android"),
     }
+    _PDFIUM_GOOGLESOURCE_BASE = "https://pdfium.googlesource.com/pdfium"
 
     def __init__(
         self,
@@ -283,6 +287,7 @@ class ChromiumMirrorSource:
                 "files": [],
                 "base_ref": normalized_base_ref,
                 "head_ref": normalized_head_ref,
+                "compare_url": "",
                 "filter_metrics": {
                     "total_files_from_api": 0,
                     "after_platform_filter": 0,
@@ -314,32 +319,73 @@ class ChromiumMirrorSource:
         )
 
         if status >= 400 or not isinstance(payload, dict):
-            warnings.append(f"GitHub compare failed for range {normalized_base_ref}...{normalized_head_ref}: {error}")
-            return {
-                "status": "error",
-                "commits": [],
-                "files": [],
-                "base_ref": normalized_base_ref,
-                "head_ref": normalized_head_ref,
-                "filter_metrics": {
-                    "total_files_from_api": 0,
-                    "after_platform_filter": 0,
-                    "after_path_prefix_filter": 0,
-                    "after_extension_filter": 0,
-                    "after_keyword_filter": 0,
-                    "after_soft_focus_filter": 0,
-                    "commit_confidence_fallback_applied": False,
-                    "soft_file_focus_fallback_applied": False,
-                },
-                "total_commits": 0,
-                "ahead_by": 0,
-                "behind_by": 0,
-                "total_files": 0,
-                "truncated": False,
-                "platform": platform.value,
-                "component": component.value,
-                "release_channel": "",
-            }, warnings
+            if component == CompareComponent.PDFIUM:
+                googlesource_payload, googlesource_error = self._get_pdfium_googlesource_compare_payload(
+                    base_ref=normalized_base_ref,
+                    head_ref=normalized_head_ref,
+                )
+                if isinstance(googlesource_payload, dict):
+                    payload = googlesource_payload
+                else:
+                    warnings.append(
+                        "GitHub compare failed for range "
+                        f"{normalized_base_ref}...{normalized_head_ref}: {error}; "
+                        f"pdfium.googlesource compare also failed: {googlesource_error or 'unknown error'}"
+                    )
+                    return {
+                        "status": "error",
+                        "commits": [],
+                        "files": [],
+                        "base_ref": normalized_base_ref,
+                        "head_ref": normalized_head_ref,
+                        "compare_url": "",
+                        "filter_metrics": {
+                            "total_files_from_api": 0,
+                            "after_platform_filter": 0,
+                            "after_path_prefix_filter": 0,
+                            "after_extension_filter": 0,
+                            "after_keyword_filter": 0,
+                            "after_soft_focus_filter": 0,
+                            "commit_confidence_fallback_applied": False,
+                            "soft_file_focus_fallback_applied": False,
+                        },
+                        "total_commits": 0,
+                        "ahead_by": 0,
+                        "behind_by": 0,
+                        "total_files": 0,
+                        "truncated": False,
+                        "platform": platform.value,
+                        "component": component.value,
+                        "release_channel": "",
+                    }, warnings
+            else:
+                warnings.append(f"GitHub compare failed for range {normalized_base_ref}...{normalized_head_ref}: {error}")
+                return {
+                    "status": "error",
+                    "commits": [],
+                    "files": [],
+                    "base_ref": normalized_base_ref,
+                    "head_ref": normalized_head_ref,
+                    "compare_url": "",
+                    "filter_metrics": {
+                        "total_files_from_api": 0,
+                        "after_platform_filter": 0,
+                        "after_path_prefix_filter": 0,
+                        "after_extension_filter": 0,
+                        "after_keyword_filter": 0,
+                        "after_soft_focus_filter": 0,
+                        "commit_confidence_fallback_applied": False,
+                        "soft_file_focus_fallback_applied": False,
+                    },
+                    "total_commits": 0,
+                    "ahead_by": 0,
+                    "behind_by": 0,
+                    "total_files": 0,
+                    "truncated": False,
+                    "platform": platform.value,
+                    "component": component.value,
+                    "release_channel": "",
+                }, warnings
 
         normalized_prefixes = [item.strip().lower().lstrip("/") for item in (path_prefixes or []) if item.strip()]
         normalized_extensions = [self._normalize_extension(item) for item in (file_extensions or []) if item.strip()]
@@ -473,7 +519,13 @@ class ChromiumMirrorSource:
             evidence_match = self._matches_any_evidence_token(file_haystack, normalized_evidence_tokens)
 
             normalized_name = filename.strip().lstrip("/")
+            base_raw_url = str(file_payload.get("base_raw_url", "") or "").strip()
+            if not base_raw_url:
+                base_raw_url = self._build_raw_url(self._config.github_repo, normalized_base_ref, normalized_name)
+
             head_raw_url = str(file_payload.get("raw_url", "") or "").strip()
+            if not head_raw_url:
+                head_raw_url = str(file_payload.get("head_raw_url", "") or "").strip()
             if not head_raw_url:
                 head_raw_url = self._build_raw_url(self._config.github_repo, normalized_head_ref, normalized_name)
 
@@ -487,7 +539,7 @@ class ChromiumMirrorSource:
                         "changes": int(file_payload.get("changes", 0) or 0),
                         "blob_url": str(file_payload.get("blob_url", "") or ""),
                         "raw_url": head_raw_url,
-                        "base_raw_url": self._build_raw_url(self._config.github_repo, normalized_base_ref, normalized_name),
+                        "base_raw_url": base_raw_url,
                         "head_raw_url": head_raw_url,
                         "file_key": self._build_file_key(component, normalized_name),
                         "patch": patch,
@@ -537,6 +589,7 @@ class ChromiumMirrorSource:
             "files": compare_files,
             "base_ref": normalized_base_ref,
             "head_ref": normalized_head_ref,
+            "compare_url": str(payload.get("compare_url", "") or ""),
             "filter_metrics": {
                 "total_files_from_api": len(raw_files),
                 "after_platform_filter": files_after_platform_filter,
@@ -863,6 +916,209 @@ class ChromiumMirrorSource:
             score = min(score, 0.12)
 
         return round(max(0.05, min(score, 1.0)), 3)
+
+    def _parse_json_with_optional_xssi(self, text: str) -> Any:
+        payload = str(text or "")
+        stripped = payload.lstrip()
+        if stripped.startswith(")]}'"):
+            lines = stripped.splitlines()
+            payload = "\n".join(lines[1:]) if len(lines) > 1 else ""
+        return json.loads(payload)
+
+    def _build_googlesource_file_url(self, ref: str, filename: str, *, raw: bool) -> str:
+        safe_ref = quote(str(ref or "").strip(), safe="")
+        safe_filename = quote(str(filename or "").strip().lstrip("/"), safe="/")
+        if not safe_ref or not safe_filename:
+            return ""
+
+        suffix = "?format=TEXT" if raw else ""
+        return f"{self._PDFIUM_GOOGLESOURCE_BASE}/+/{safe_ref}/{safe_filename}{suffix}"
+
+    def _parse_unified_patch_sections(self, patch_text: str) -> list[dict[str, Any]]:
+        sections: list[list[str]] = []
+        current: list[str] = []
+
+        for line in str(patch_text or "").splitlines():
+            if line.startswith("diff --git "):
+                if current:
+                    sections.append(current)
+                current = [line]
+                continue
+            if current:
+                current.append(line)
+
+        if current:
+            sections.append(current)
+
+        parsed: list[dict[str, Any]] = []
+        for section_lines in sections:
+            header = section_lines[0]
+            match = re.match(r"diff --git a/(?P<old>.+?) b/(?P<new>.+)$", header)
+            if not match:
+                continue
+
+            old_path = match.group("old")
+            new_path = match.group("new")
+            status = "modified"
+            filename = new_path
+            rename_to = ""
+
+            for marker in section_lines[1:40]:
+                if marker.startswith("new file mode "):
+                    status = "added"
+                elif marker.startswith("deleted file mode "):
+                    status = "removed"
+                    filename = old_path
+                elif marker.startswith("rename from "):
+                    status = "renamed"
+                elif marker.startswith("rename to "):
+                    status = "renamed"
+                    rename_to = marker[len("rename to ") :].strip()
+
+            if rename_to:
+                filename = rename_to
+
+            additions = sum(1 for line in section_lines if line.startswith("+") and not line.startswith("+++"))
+            deletions = sum(1 for line in section_lines if line.startswith("-") and not line.startswith("---"))
+
+            parsed.append(
+                {
+                    "filename": filename,
+                    "status": status,
+                    "additions": additions,
+                    "deletions": deletions,
+                    "changes": additions + deletions,
+                    "patch": "\n".join(section_lines),
+                }
+            )
+
+        return parsed
+
+    def _merge_file_status(self, prior: str, current: str) -> str:
+        normalized_prior = str(prior or "").strip().lower()
+        normalized_current = str(current or "").strip().lower()
+        if normalized_prior == normalized_current:
+            return normalized_current or normalized_prior
+
+        priority = {
+            "removed": 4,
+            "added": 3,
+            "renamed": 2,
+            "modified": 1,
+        }
+        prior_weight = priority.get(normalized_prior, 0)
+        current_weight = priority.get(normalized_current, 0)
+        return normalized_prior if prior_weight >= current_weight else normalized_current
+
+    def _get_pdfium_googlesource_compare_payload(
+        self,
+        *,
+        base_ref: str,
+        head_ref: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        safe_base = quote(str(base_ref or "").strip(), safe="")
+        safe_head = quote(str(head_ref or "").strip(), safe="")
+        if not safe_base or not safe_head:
+            return None, "Missing base/head refs for pdfium.googlesource compare."
+
+        log_url = f"{self._PDFIUM_GOOGLESOURCE_BASE}/+log/{safe_base}..{safe_head}?format=JSON"
+        status, log_text, error = self._http.try_get_text(log_url, headers={"Accept": "application/json, text/plain, */*"})
+        if status >= 400 or not log_text:
+            return None, f"log lookup failed: {error}"
+
+        try:
+            parsed_log = self._parse_json_with_optional_xssi(log_text)
+        except (json.JSONDecodeError, ValueError) as exc:
+            return None, f"Could not parse log payload: {exc}"
+
+        if not isinstance(parsed_log, dict):
+            return None, "Unexpected log payload shape from pdfium.googlesource."
+
+        log_items = [item for item in (parsed_log.get("log") or []) if isinstance(item, dict)]
+        commits_payload: list[dict[str, Any]] = []
+        file_map: dict[str, dict[str, Any]] = {}
+
+        for item in log_items:
+            sha = str(item.get("commit", "") or "").strip()
+            if not sha:
+                continue
+
+            message = str(item.get("message", "") or "")
+            author = item.get("author") if isinstance(item.get("author"), dict) else {}
+            author_name = str((author or {}).get("name", "") or "")
+            author_time = str((author or {}).get("time", "") or "")
+
+            commits_payload.append(
+                {
+                    "sha": sha,
+                    "html_url": f"{self._PDFIUM_GOOGLESOURCE_BASE}/+/{sha}",
+                    "commit": {
+                        "message": message,
+                        "author": {
+                            "name": author_name,
+                            "date": author_time,
+                        },
+                    },
+                }
+            )
+
+            patch_url = f"{self._PDFIUM_GOOGLESOURCE_BASE}/+/{quote(sha, safe='')}^!?format=TEXT"
+            patch_status, patch_b64, _patch_error = self._http.try_get_text(
+                patch_url,
+                headers={"Accept": "text/plain, */*"},
+            )
+            if patch_status >= 400 or not patch_b64:
+                continue
+
+            try:
+                patch_bytes = base64.b64decode(patch_b64.encode("utf-8"), validate=False)
+                patch_text = patch_bytes.decode("utf-8", errors="replace")
+            except (binascii.Error, ValueError):
+                continue
+
+            for section in self._parse_unified_patch_sections(patch_text):
+                filename = str(section.get("filename", "") or "").strip().lstrip("/")
+                if not filename:
+                    continue
+
+                existing = file_map.get(filename)
+                if existing is None:
+                    file_map[filename] = {
+                        "filename": filename,
+                        "status": str(section.get("status", "modified") or "modified"),
+                        "additions": int(section.get("additions", 0) or 0),
+                        "deletions": int(section.get("deletions", 0) or 0),
+                        "changes": int(section.get("changes", 0) or 0),
+                        "blob_url": self._build_googlesource_file_url(head_ref, filename, raw=False),
+                        "raw_url": self._build_googlesource_file_url(head_ref, filename, raw=True),
+                        "head_raw_url": self._build_googlesource_file_url(head_ref, filename, raw=True),
+                        "base_raw_url": self._build_googlesource_file_url(base_ref, filename, raw=True),
+                        "patch": str(section.get("patch", "") or ""),
+                    }
+                    continue
+
+                existing["status"] = self._merge_file_status(existing.get("status", "modified"), section.get("status", "modified"))
+                existing["additions"] = int(existing.get("additions", 0) or 0) + int(section.get("additions", 0) or 0)
+                existing["deletions"] = int(existing.get("deletions", 0) or 0) + int(section.get("deletions", 0) or 0)
+                existing["changes"] = int(existing.get("changes", 0) or 0) + int(section.get("changes", 0) or 0)
+
+                combined_patch = f"{existing.get('patch', '')}\n\n{str(section.get('patch', '') or '')}".strip()
+                existing["patch"] = combined_patch[:20000]
+
+        files_payload = list(file_map.values())
+        return {
+            "status": "ok",
+            "commits": commits_payload,
+            "files": files_payload,
+            "base_ref": base_ref,
+            "head_ref": head_ref,
+            "compare_url": f"{self._PDFIUM_GOOGLESOURCE_BASE}/+log/{safe_base}..{safe_head}",
+            "total_commits": len(commits_payload),
+            "ahead_by": len(commits_payload),
+            "behind_by": 0,
+            "total_files": len(files_payload),
+            "truncated": False,
+        }, None
 
     def _build_raw_url(self, repo: str, ref: str, filename: str) -> str:
         safe_repo = str(repo or "").strip("/")

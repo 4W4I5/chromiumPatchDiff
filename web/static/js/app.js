@@ -367,6 +367,41 @@ function parseCsv(value) {
     .filter(Boolean);
 }
 
+function renderDiffText(preNode, rawDiffText) {
+  if (!preNode) {
+    return;
+  }
+
+  const text = String(rawDiffText || "");
+  preNode.innerHTML = "";
+
+  const lines = text ? text.split("\n") : ["No diff preview available."];
+  lines.forEach((line) => {
+    const lineNode = document.createElement("span");
+    lineNode.className = "diff-line";
+
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      lineNode.classList.add("diff-line-add");
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      lineNode.classList.add("diff-line-remove");
+    } else if (line.startsWith("@@")) {
+      lineNode.classList.add("diff-line-hunk");
+    } else if (
+      line.startsWith("diff --") ||
+      line.startsWith("index ") ||
+      line.startsWith("+++") ||
+      line.startsWith("---")
+    ) {
+      lineNode.classList.add("diff-line-meta");
+    } else {
+      lineNode.classList.add("diff-line-context");
+    }
+
+    lineNode.textContent = line || " ";
+    preNode.appendChild(lineNode);
+  });
+}
+
 async function copyTextToClipboard(text) {
   const value = String(text || "");
   if (!value) {
@@ -730,7 +765,19 @@ function renderCompare(compare) {
     files.forEach((file) => {
       const node = document.createElement("details");
       const summary = document.createElement("summary");
-      summary.textContent = `${file.filename || "unknown"} [${file.status || ""}] +${file.additions || 0}/-${file.deletions || 0}`;
+      summary.appendChild(document.createTextNode(`${file.filename || "unknown"} [${file.status || ""}] `));
+
+      const additionsNode = document.createElement("span");
+      additionsNode.className = "diff-count-add";
+      additionsNode.textContent = `+${file.additions || 0}`;
+      summary.appendChild(additionsNode);
+
+      summary.appendChild(document.createTextNode("/"));
+
+      const deletionsNode = document.createElement("span");
+      deletionsNode.className = "diff-count-remove";
+      deletionsNode.textContent = `-${file.deletions || 0}`;
+      summary.appendChild(deletionsNode);
 
       const fileActions = document.createElement("div");
       fileActions.className = "file-actions";
@@ -755,7 +802,8 @@ function renderCompare(compare) {
       }
 
       const patch = document.createElement("pre");
-      patch.textContent = file.patch || "(No patch text)";
+      patch.className = "diff-preview";
+      renderDiffText(patch, file.patch || "(No patch text)");
 
       node.appendChild(summary);
       node.appendChild(fileActions);
@@ -1013,7 +1061,8 @@ function renderFullSourcePayload(payload, hostNode) {
   const diffSummary = document.createElement("summary");
   diffSummary.textContent = "Unified diff preview";
   const diffPre = document.createElement("pre");
-  diffPre.textContent = String(payload.unified_diff_preview || "No diff preview available.");
+  diffPre.className = "diff-preview";
+  renderDiffText(diffPre, payload.unified_diff_preview || "No diff preview available.");
   diffDetails.appendChild(diffSummary);
   diffDetails.appendChild(diffPre);
   hostNode.appendChild(diffDetails);

@@ -30,6 +30,7 @@ def index(request: Request) -> HTMLResponse:
         "index.html",
         {
             "request": request,
+            "asset_version": str(getattr(request.app, "version", "dev")),
             "components": [
                 {"value": item.value, "label": component_labels.get(item.value, item.value.title())}
                 for item in CompareComponent

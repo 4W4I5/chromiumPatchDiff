@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import difflib
 import re
 import threading
@@ -267,6 +269,12 @@ def _load_text_content(
     status, payload, headers, error = http.try_get_bytes(url, headers={"Accept": "text/plain, */*"})
     if status >= 400:
         return "", [f"Source fetch failed ({status}) for {url}: {error}"]
+
+    if "googlesource.com" in str(url).lower() and "format=text" in str(url).lower():
+        try:
+            payload = base64.b64decode(payload, validate=False)
+        except (binascii.Error, ValueError):
+            return "", [f"Source fetch returned non-decodable googlesource text payload for {url}."]
 
     content_type = str((headers or {}).get("Content-Type", "") or "").lower()
     if content_type and not any(marker in content_type for marker in ("text", "json", "javascript", "xml", "x-c", "x-c++")):

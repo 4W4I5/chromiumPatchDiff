@@ -513,6 +513,12 @@ class AnalysisService:
             request_progress = start_progress + int((index - 1) * progress_span / len(selected_components))
             progress(request_progress, f"Comparing {component.value} ({index}/{len(selected_components)})")
 
+            component_strict_commit_platform = strict_commit_platform
+            component_strict_file_platform = strict_file_platform
+            if component == CompareComponent.PDFIUM:
+                component_strict_commit_platform = False
+                component_strict_file_platform = False
+
             source = ChromiumMirrorSource(HttpClient(cfg), cfg)
             compare_payload, compare_warnings = source.get_compare_diff(
                 base_version=resolved_ref.base_ref,
@@ -525,8 +531,8 @@ class AnalysisService:
                 keywords=hard_keywords,
                 soft_keywords=soft_keywords,
                 evidence_tokens=evidence_tokens,
-                strict_commit_platform=strict_commit_platform,
-                strict_file_platform=strict_file_platform,
+                strict_commit_platform=component_strict_commit_platform,
+                strict_file_platform=component_strict_file_platform,
                 soft_file_focus=soft_file_focus,
                 min_commit_confidence=min_commit_confidence,
             )
@@ -553,7 +559,10 @@ class AnalysisService:
                 component_status = "unchanged"
 
             compare_url = ""
-            if component_status not in {"unchanged", "error"}:
+            payload_compare_url = str(compare_payload.get("compare_url", "") or "").strip()
+            if payload_compare_url:
+                compare_url = payload_compare_url
+            elif component_status not in {"unchanged", "error"}:
                 compare_url = self._build_compare_url(repo, resolved_ref.base_ref, resolved_ref.head_ref)
 
             component_results.append(

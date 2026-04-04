@@ -504,6 +504,14 @@ details summary {
   color: var(--muted);
 }
 
+.diff-count-add {
+  color: #3ee26d;
+}
+
+.diff-count-remove {
+  color: #ff5d5d;
+}
+
 pre {
   background: #11241b;
   color: #d5fbe6;
@@ -512,6 +520,35 @@ pre {
   overflow: auto;
   font-family: var(--font-mono);
   font-size: 0.82rem;
+}
+
+pre.diff-preview {
+  color: #dbe9e1;
+}
+
+.diff-preview .diff-line {
+  display: block;
+  white-space: pre;
+}
+
+.diff-preview .diff-line-add {
+  color: #3ee26d;
+}
+
+.diff-preview .diff-line-remove {
+  color: #ff5d5d;
+}
+
+.diff-preview .diff-line-hunk {
+  color: #63c6ff;
+}
+
+.diff-preview .diff-line-meta {
+  color: #9fb7ab;
+}
+
+.diff-preview .diff-line-context {
+  color: #dbe9e1;
 }
 
 .table-grid {
