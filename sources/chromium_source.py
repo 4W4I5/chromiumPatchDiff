@@ -271,6 +271,7 @@ class ChromiumMirrorSource:
         keywords: list[str] | None = None,
         soft_keywords: list[str] | None = None,
         evidence_tokens: list[str] | None = None,
+        soft_path_hints: list[str] | None = None,
         strict_commit_platform: bool = True,
         strict_file_platform: bool = True,
         soft_file_focus: bool = False,
@@ -406,6 +407,15 @@ class ChromiumMirrorSource:
         normalized_hard_keywords = self._normalize_keywords(keyword=keyword, keywords=keywords)
         normalized_soft_keywords = self._normalize_keywords(keyword="", keywords=soft_keywords)
         normalized_evidence_tokens = self._normalize_evidence_tokens(evidence_tokens)
+        normalized_soft_path_hints: list[str] = []
+        seen_soft_path_hints: set[str] = set()
+        for item in soft_path_hints or []:
+            normalized = str(item or "").strip().lower().lstrip("/")
+            if not normalized or normalized in seen_soft_path_hints:
+                continue
+            seen_soft_path_hints.add(normalized)
+            normalized_soft_path_hints.append(normalized)
+
         try:
             min_commit_confidence = float(min_commit_confidence)
         except (TypeError, ValueError):
@@ -531,6 +541,7 @@ class ChromiumMirrorSource:
 
             soft_focus_match = self._matches_any_keyword(file_haystack, normalized_soft_keywords) if normalized_soft_keywords else False
             evidence_match = self._matches_any_evidence_token(file_haystack, normalized_evidence_tokens)
+            path_hint_match = any(hint in lowered_filename for hint in normalized_soft_path_hints) if normalized_soft_path_hints else False
 
             normalized_name = filename.strip().lstrip("/")
             base_raw_url = str(file_payload.get("base_raw_url", "") or "").strip()
@@ -558,11 +569,11 @@ class ChromiumMirrorSource:
                         "file_key": self._build_file_key(component, normalized_name),
                         "patch": patch,
                     },
-                    soft_focus_match or evidence_match,
+                    soft_focus_match or evidence_match or path_hint_match,
                 )
             )
 
-        if soft_file_focus and (normalized_soft_keywords or normalized_evidence_tokens):
+        if soft_file_focus and (normalized_soft_keywords or normalized_evidence_tokens or normalized_soft_path_hints):
             focused_files = [item for item, matches_focus in candidate_files if matches_focus]
             if focused_files:
                 compare_files = focused_files
@@ -623,12 +634,103 @@ class ChromiumMirrorSource:
             "component": component.value,
             "keywords": normalized_hard_keywords,
             "soft_keywords": normalized_soft_keywords,
+            "soft_path_hints": normalized_soft_path_hints,
             "strict_commit_platform": bool(strict_commit_platform),
             "strict_file_platform": bool(strict_file_platform),
             "soft_file_focus": bool(soft_file_focus),
             "min_commit_confidence": min_commit_confidence,
             "release_channel": "",
         }, warnings
+
+    def get_files_for_commit_shas(
+        self,
+        *,
+        commit_shas: list[str],
+        base_ref: str,
+        head_ref: str,
+        component: CompareComponent,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        warnings: list[str] = []
+        normalized_shas: list[str] = []
+        seen_shas: set[str] = set()
+
+        for item in commit_shas:
+            sha = str(item or "").strip()
+            if not sha or sha in seen_shas:
+                continue
+            seen_shas.add(sha)
+            normalized_shas.append(sha)
+
+        if not normalized_shas:
+            return [], warnings
+
+        file_map: dict[str, dict[str, Any]] = {}
+        for sha in normalized_shas:
+            endpoint = f"{self._config.github_api_base}/repos/{self._config.github_repo}/commits/{sha}"
+            self._throttle_github_requests()
+            status, payload, error = self._http.try_get_json(
+                endpoint,
+                headers=self._config.github_headers,
+            )
+
+            if status >= 400 or not isinstance(payload, dict):
+                warnings.append(f"Commit file fetch failed for {sha[:12]}: {error or 'unknown error'}")
+                continue
+
+            for file_payload in payload.get("files", []) or []:
+                if not isinstance(file_payload, dict):
+                    continue
+
+                filename = str(file_payload.get("filename", "") or "").strip().lstrip("/")
+                if not filename:
+                    continue
+
+                previous_filename = str(file_payload.get("previous_filename", "") or "").strip().lstrip("/")
+                raw_status = str(file_payload.get("status", "modified") or "modified").strip().lower()
+                normalized_status = "modified"
+                if raw_status in {"added", "removed", "renamed"}:
+                    normalized_status = raw_status
+
+                additions = int(file_payload.get("additions", 0) or 0)
+                deletions = int(file_payload.get("deletions", 0) or 0)
+                changes = int(file_payload.get("changes", additions + deletions) or 0)
+                patch_text = str(file_payload.get("patch", "") or "")
+
+                existing = file_map.get(filename)
+                if existing is None:
+                    head_raw_url = str(file_payload.get("raw_url", "") or "").strip()
+                    if not head_raw_url:
+                        head_raw_url = self._build_raw_url(self._config.github_repo, head_ref, filename)
+
+                    base_name = previous_filename or filename
+                    base_raw_url = self._build_raw_url(self._config.github_repo, base_ref, base_name)
+
+                    file_map[filename] = {
+                        "filename": filename,
+                        "status": normalized_status,
+                        "additions": additions,
+                        "deletions": deletions,
+                        "changes": changes,
+                        "blob_url": str(file_payload.get("blob_url", "") or "").strip(),
+                        "raw_url": head_raw_url,
+                        "base_raw_url": base_raw_url,
+                        "head_raw_url": head_raw_url,
+                        "file_key": self._build_file_key(component, filename),
+                        "patch": patch_text,
+                    }
+                    continue
+
+                existing["status"] = self._merge_file_status(existing.get("status", "modified"), normalized_status)
+                existing["additions"] = int(existing.get("additions", 0) or 0) + additions
+                existing["deletions"] = int(existing.get("deletions", 0) or 0) + deletions
+                existing["changes"] = int(existing.get("changes", 0) or 0) + changes
+
+                if patch_text:
+                    combined_patch = f"{existing.get('patch', '')}\n\n{patch_text}".strip()
+                    existing["patch"] = combined_patch[:20000]
+
+        files_payload = sorted(file_map.values(), key=lambda item: str(item.get("filename", "")).lower())
+        return files_payload, warnings
 
     def list_version_tags(
         self,

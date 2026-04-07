@@ -9,18 +9,41 @@ CVE_ID_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
 _TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]{2,}")
 
 _FOCUS_ALIAS_MAP: dict[str, list[str]] = {
-    "webcodecs": ["webcodecs", "codec"],
-    "codec": ["codec", "codecs"],
+    "webcodecs": ["webcodecs", "codec", "codecs", "media", "encoder", "decoder"],
+    "codec": ["codec", "codecs", "webcodecs", "media", "encode", "decode", "encoder", "decoder"],
+    "codecs": ["codec", "codecs", "webcodecs", "media", "encode", "decode", "encoder", "decoder"],
     "webrtc": ["webrtc", "rtc"],
-    "pdfium": ["pdfium", "pdf"],
+    "webusb": ["webusb", "usb"],
+    "web usb": ["webusb", "usb"],
+    "webmidi": ["webmidi", "midi"],
+    "web midi": ["webmidi", "midi"],
+    "webgl": ["webgl", "gl", "gpu", "angle"],
+    "webview": ["webview", "android", "android_webview"],
+    "web view": ["webview", "android", "android_webview"],
+    "pdfium": ["pdfium", "pdf", "fpdf", "xfa"],
+    "pdf": ["pdf", "pdfium", "fpdf", "xfa"],
     "skia": ["skia"],
-    "v8": ["v8", "javascript"],
+    "v8": ["v8", "turbofan", "javascript"],
+    "dawn": ["dawn", "webgpu", "gpu"],
+    "angle": ["angle", "egl", "gles", "gpu", "gl"],
     "blink": ["blink", "renderer"],
+    "css": ["css", "style", "blink", "renderer"],
+    "navigation": ["navigation", "navigate", "browser", "blink"],
+    "compositing": ["compositing", "compositor", "viz", "cc/", "renderpass", "surface", "layer"],
     "media": ["media", "codec"],
-    "gpu": ["gpu", "gl"],
+    "gpu": ["gpu", "gl", "angle", "dawn", "webgl"],
+    "use after free": ["uaf", "use after free"],
+    "heap buffer overflow": ["heap overflow", "overflow"],
+    "integer overflow": ["integer overflow", "overflow"],
+    "out of bounds": ["oob", "out of bounds"],
+    "object corruption": ["corruption", "object corruption"],
 }
 
 _FOCUS_STOPWORDS = {
+    "high",
+    "medium",
+    "low",
+    "critical",
     "out",
     "bounds",
     "read",
@@ -31,6 +54,7 @@ _FOCUS_STOPWORDS = {
     "in",
     "the",
     "and",
+    "web",
     "for",
     "via",
     "from",
@@ -49,6 +73,17 @@ _FOCUS_STOPWORDS = {
     "page",
     "html",
     "javascript",
+    "heap",
+    "buffer",
+    "overflow",
+    "integer",
+    "object",
+    "corruption",
+    "inappropriate",
+    "implementation",
+    "insufficient",
+    "policy",
+    "enforcement",
 }
 
 
@@ -253,9 +288,10 @@ def normalize_cve_record(raw: dict[str, Any], source: str) -> CveRecord | None:
     )
 
 
-def infer_focus_keywords(title: str, description: str, limit: int = 8) -> list[str]:
+def infer_focus_keywords(title: str, description: str, limit: int = 10) -> list[str]:
     combined = f"{str(title or '').strip()}\n{str(description or '').strip()}"
     lowered = combined.lower()
+    normalized_blob = re.sub(r"[^a-z0-9]+", " ", lowered)
 
     collected: list[str] = []
     seen: set[str] = set()
@@ -271,15 +307,16 @@ def infer_focus_keywords(title: str, description: str, limit: int = 8) -> list[s
         seen.add(normalized)
         collected.append(normalized)
 
+    searchable = f"{lowered}\n{normalized_blob}"
     for trigger, aliases in _FOCUS_ALIAS_MAP.items():
-        if trigger in lowered:
+        if trigger in searchable:
             for alias in aliases:
                 _add(alias)
 
     for token in _TOKEN_RE.findall(str(title or "")):
         _add(token)
 
-    if not collected:
+    if len(collected) < limit:
         for token in _TOKEN_RE.findall(str(description or "")):
             _add(token)
             if len(collected) >= limit:

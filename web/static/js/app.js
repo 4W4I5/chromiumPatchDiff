@@ -197,24 +197,21 @@ function buildPayload() {
     return null;
   }
 
-  const selectedComponents = advancedVisible
-    ? Array.from(document.querySelectorAll("input[name='components']:checked"))
-      .map((node) => node.value)
-      .filter(Boolean)
-    : ["chrome"];
+  const selectedComponents = Array.from(document.querySelectorAll("input[name='components']:checked"))
+    .map((node) => node.value)
+    .filter(Boolean);
 
-  if (!selectedComponents.length) {
-    setStatus("Select at least one component.", 0);
-    return null;
-  }
+  const normalizedSelectedComponents = selectedComponents.length ? selectedComponents : ["chrome"];
+  const isChromeOnly = normalizedSelectedComponents.length === 1 && normalizedSelectedComponents[0] === "chrome";
+  const minimalMode = !advancedVisible && isChromeOnly;
 
   return {
     input_mode: mode,
     cve_id: cveId,
     version,
-    minimal_mode: !advancedVisible,
+    minimal_mode: minimalMode,
     platform: advancedVisible ? document.getElementById("platform").value : "windows",
-    components: selectedComponents,
+    components: normalizedSelectedComponents,
     path_prefixes: advancedVisible ? parseCsv(pathPrefixesInput.value) : [],
     file_extensions: advancedVisible ? parseCsv(document.getElementById("file-extensions").value) : [],
     keyword: advancedVisible ? document.getElementById("keyword").value.trim() : "",
@@ -621,6 +618,8 @@ function renderEffectiveFocus(result) {
 
   const keywordList = Array.isArray(focus.keywords) ? focus.keywords : [];
   const autoKeywordList = Array.isArray(focus.auto_keywords) ? focus.auto_keywords : [];
+  const releaseKeywordList = Array.isArray(focus.release_keywords) ? focus.release_keywords : [];
+  const pathHintList = Array.isArray(focus.path_hints) ? focus.path_hints : [];
   const componentList = Array.isArray(focus.components)
     ? focus.components
     : Array.isArray((latestRequestPayload || {}).components)
@@ -632,6 +631,8 @@ function renderEffectiveFocus(result) {
     ["Code scope", focus.code_scope || "changed-files-only"],
     ["Components", componentList.length ? componentList.join(", ") : "chrome"],
     ["Auto keywords", autoKeywordList.length ? autoKeywordList.join(", ") : "(none)"],
+    ["Release keywords", releaseKeywordList.length ? releaseKeywordList.join(", ") : "(none)"],
+    ["Path hints", pathHintList.length ? pathHintList.join(", ") : "(none)"],
     ["Effective keywords", keywordList.length ? keywordList.join(", ") : "(none)"],
   ];
 
@@ -742,6 +743,25 @@ function renderCompare(compare) {
     head.appendChild(stats);
     card.appendChild(head);
 
+    const commits = Array.isArray(component.commits) ? component.commits : [];
+    const mappedCommits = commits.filter((item) => Array.isArray(item.mapped_release_cves) && item.mapped_release_cves.length);
+    if (mappedCommits.length) {
+      const mappedCveSet = new Set();
+      mappedCommits.forEach((item) => {
+        (item.mapped_release_cves || []).forEach((cve) => {
+          const normalized = String(cve || "").trim();
+          if (normalized) {
+            mappedCveSet.add(normalized);
+          }
+        });
+      });
+
+      const mappedLine = document.createElement("p");
+      mappedLine.className = "mono";
+      mappedLine.textContent = `mapped_cve_commits=${mappedCommits.length} cves=${Array.from(mappedCveSet).join(", ") || "(none)"}`;
+      card.appendChild(mappedLine);
+    }
+
     const url = document.createElement("a");
     url.href = component.compare_url || "#";
     url.textContent = component.compare_url || "Compare URL";
@@ -837,6 +857,14 @@ function renderReleaseBlog(releaseBlog) {
   summary.textContent = `${posts.length} Stable Desktop post(s) matched.`;
   releaseBlogNode.appendChild(summary);
 
+  const queryBugIds = Array.isArray(payload.query_cve_bug_ids) ? payload.query_cve_bug_ids : [];
+  if (queryBugIds.length) {
+    const bugLine = document.createElement("p");
+    bugLine.className = "mono";
+    bugLine.textContent = `mapped_bug_ids=${queryBugIds.join(", ")}`;
+    releaseBlogNode.appendChild(bugLine);
+  }
+
   if (selected) {
     const selectedNode = document.createElement("div");
     selectedNode.className = "release-selected";
@@ -905,6 +933,14 @@ function renderReleaseBlog(releaseBlog) {
       cveLine.className = "mono";
       cveLine.textContent = `cves=${cves.join(", ")}`;
       card.appendChild(cveLine);
+    }
+
+    const bugIds = Array.isArray(post.matched_bug_ids) ? post.matched_bug_ids : [];
+    if (bugIds.length) {
+      const bugIdLine = document.createElement("p");
+      bugIdLine.className = "mono";
+      bugIdLine.textContent = `bug_ids=${bugIds.join(", ")}`;
+      card.appendChild(bugIdLine);
     }
 
     const logLinks = Array.isArray(post.log_links) ? post.log_links : [];

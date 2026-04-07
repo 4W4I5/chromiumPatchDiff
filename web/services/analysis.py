@@ -20,6 +20,44 @@ from web.services.version_catalog import VersionCatalogService
 
 
 class AnalysisService:
+    _SOFT_PATH_HINTS_BY_TOKEN: dict[str, list[str]] = {
+        "compositing": [
+            "cc/",
+            "components/viz/",
+            "ui/compositor/",
+            "third_party/blink/renderer/platform/graphics/",
+            "third_party/blink/renderer/core/paint/",
+        ],
+        "compositor": ["cc/", "components/viz/", "ui/compositor/"],
+        "codec": [
+            "media/",
+            "third_party/blink/renderer/modules/webcodecs/",
+            "third_party/blink/renderer/modules/media/",
+            "gpu/command_buffer/",
+        ],
+        "codecs": [
+            "media/",
+            "third_party/blink/renderer/modules/webcodecs/",
+            "third_party/blink/renderer/modules/media/",
+            "gpu/command_buffer/",
+        ],
+        "encode": ["media/", "third_party/blink/renderer/modules/webcodecs/"],
+        "decode": ["media/", "third_party/blink/renderer/modules/webcodecs/"],
+        "webgl": ["third_party/blink/renderer/modules/webgl/", "gpu/", "third_party/angle/"],
+        "angle": ["third_party/angle/", "gpu/", "third_party/blink/renderer/modules/webgl/"],
+        "gpu": ["gpu/", "components/viz/", "third_party/angle/"],
+        "skia": ["skia/", "cc/paint/"],
+        "pdf": ["components/pdf/", "chrome/browser/pdf/", "pdf/", "third_party/pdfium/", "fpdfsdk/", "core/fpdf"],
+        "pdfium": ["components/pdf/", "chrome/browser/pdf/", "pdf/", "third_party/pdfium/", "fpdfsdk/", "core/fpdf"],
+        "webusb": ["third_party/blink/renderer/modules/webusb/", "services/device/usb/", "device/usb/"],
+        "webmidi": ["third_party/blink/renderer/modules/webmidi/", "media/midi/", "services/device/midi/"],
+        "navigation": ["content/browser/", "content/renderer/", "third_party/blink/renderer/core/frame/"],
+        "webview": ["android_webview/", "android/"],
+        "v8": ["src/compiler/", "src/objects/", "src/heap/", "v8/"],
+        "dawn": ["third_party/dawn/", "gpu/", "third_party/blink/renderer/modules/webgpu/"],
+        "css": ["third_party/blink/renderer/core/css/", "third_party/blink/renderer/core/style/"],
+    }
+
     def __init__(
         self,
         config: PipelineConfig,
@@ -62,11 +100,29 @@ class AnalysisService:
             version_hint=payload.version,
         )
 
+        release_security_fixes = self._collect_release_security_fixes(release_posts)
+        release_bug_map = self._build_release_bug_map(release_security_fixes)
+        release_bug_ids_for_query = sorted(
+            [bug_id for bug_id, mapped_cve in release_bug_map.items() if str(mapped_cve).strip().upper() == normalized_cve_id]
+        )
+        release_focus_keywords = self._infer_release_focus_keywords(
+            security_fixes=release_security_fixes,
+            cve_id=normalized_cve_id,
+        )
+        if release_posts and not release_bug_ids_for_query:
+            release_warnings.append(
+                f"Chrome Releases posts mention {normalized_cve_id}, but no bug IDs were mapped to this CVE from release security rows. "
+                "Continuing with broader compare evidence."
+            )
+
         release_blog_payload = {
             "query_cve_id": normalized_cve_id,
             "post_count": len(release_posts),
             "posts": release_posts,
             "selected_log_range": selected_log_range,
+            "security_fix_count": len(release_security_fixes),
+            "security_fixes": release_security_fixes,
+            "query_cve_bug_ids": release_bug_ids_for_query,
         }
 
         patched_version = ""
@@ -130,13 +186,22 @@ class AnalysisService:
             if not unpatched_version:
                 raise ValueError(f"Unable to infer a predecessor version for patched version {patched_version}.")
 
-        auto_keywords = infer_focus_keywords(cve_record.title, cve_record.description)
+        auto_keywords = self._merge_keywords(
+            infer_focus_keywords(cve_record.title, cve_record.description),
+            release_focus_keywords,
+        )
         manual_keywords = self._split_keywords(payload.keyword)
         effective_keywords = self._merge_keywords(auto_keywords, manual_keywords)
+        soft_path_hints = self._infer_soft_path_hints(
+            cve_title=cve_record.title,
+            cve_description=cve_record.description,
+            keywords=effective_keywords,
+        )
         evidence_tokens = self._build_security_evidence_tokens(
             cve_id=normalized_cve_id,
             references=cve_record.references,
             description=cve_record.description,
+            extra_issue_ids=release_bug_ids_for_query,
         )
         effective_components = self._resolve_effective_components(payload)
 
@@ -154,6 +219,10 @@ class AnalysisService:
             strict_file_platform=False,
             soft_file_focus=True,
             min_commit_confidence=0.6,
+            release_bug_map=release_bug_map,
+            target_cve_id=normalized_cve_id,
+            query_cve_bug_ids=release_bug_ids_for_query,
+            soft_path_hints=soft_path_hints,
             progress=progress,
             start_progress=52,
             end_progress=88,
@@ -208,6 +277,8 @@ class AnalysisService:
                 "components": [component.value for component in effective_components],
                 "manual_keywords": manual_keywords,
                 "auto_keywords": auto_keywords,
+                "release_keywords": release_focus_keywords,
+                "path_hints": soft_path_hints,
                 "keywords": effective_keywords,
             },
             "compare": compare_result,
@@ -263,6 +334,10 @@ class AnalysisService:
             strict_file_platform=True,
             soft_file_focus=False,
             min_commit_confidence=0.0,
+            release_bug_map={},
+            target_cve_id="",
+            query_cve_bug_ids=[],
+            soft_path_hints=[],
             progress=progress,
             start_progress=42,
             end_progress=88,
@@ -305,6 +380,7 @@ class AnalysisService:
                 "components": [component.value for component in effective_components],
                 "manual_keywords": manual_keywords,
                 "auto_keywords": [],
+                "path_hints": [],
                 "keywords": manual_keywords,
             },
             "compare": compare_result,
@@ -438,6 +514,10 @@ class AnalysisService:
         strict_file_platform: bool,
         soft_file_focus: bool,
         min_commit_confidence: float,
+        release_bug_map: dict[str, str] | None,
+        target_cve_id: str,
+        query_cve_bug_ids: list[str] | None,
+        soft_path_hints: list[str],
         progress: Callable[[int, str], None],
         start_progress: int,
         end_progress: int,
@@ -445,6 +525,19 @@ class AnalysisService:
         warnings: list[str] = []
         component_results: list[dict[str, Any]] = []
         selected_components = self._normalize_components(components or payload.components)
+        normalized_release_bug_map = {
+            str(bug_id).strip(): str(cve_id).strip().upper()
+            for bug_id, cve_id in (release_bug_map or {}).items()
+            if str(bug_id).strip() and str(cve_id).strip()
+        }
+        normalized_target_cve = str(target_cve_id or "").strip().upper()
+        normalized_query_bug_ids = sorted(
+            {
+                re.sub(r"\D", "", str(item or "").strip())
+                for item in (query_cve_bug_ids or [])
+                if re.sub(r"\D", "", str(item or "").strip())
+            }
+        )
 
         if not selected_components:
             raise ValueError("At least one component must be selected for compare.")
@@ -531,16 +624,88 @@ class AnalysisService:
                 keywords=hard_keywords,
                 soft_keywords=soft_keywords,
                 evidence_tokens=evidence_tokens,
+                soft_path_hints=soft_path_hints,
                 strict_commit_platform=component_strict_commit_platform,
                 strict_file_platform=component_strict_file_platform,
                 soft_file_focus=soft_file_focus,
                 min_commit_confidence=min_commit_confidence,
             )
 
+            commits = [asdict(item) for item in compare_payload.get("commits", []) or []]
+            strict_bug_scope_requested = bool(normalized_release_bug_map and normalized_target_cve and normalized_query_bug_ids)
+            strict_bug_scope_active = strict_bug_scope_requested
+            if normalized_release_bug_map and commits:
+                self._annotate_release_bug_cve_mappings(commits, normalized_release_bug_map)
+
+                if normalized_target_cve:
+                    for commit in commits:
+                        mapped_cves = [
+                            str(item).strip().upper()
+                            for item in (commit.get("mapped_release_cves", []) if isinstance(commit, dict) else [])
+                            if str(item).strip()
+                        ]
+                        commit["matches_query_cve"] = normalized_target_cve in mapped_cves
+
+                    if strict_bug_scope_requested:
+                        query_mapped = [
+                            commit
+                            for commit in commits
+                            if isinstance(commit, dict) and bool(commit.get("matches_query_cve", False))
+                        ]
+                        if query_mapped:
+                            commits = query_mapped
+                        else:
+                            compare_warnings.append(
+                                f"No commits in compare range were mapped to release bug IDs for {normalized_target_cve}; "
+                                "falling back to full compare diff."
+                            )
+                            strict_bug_scope_active = False
+
+            matched_bug_ids = sorted(
+                {
+                    str(bug_id)
+                    for commit in commits
+                    for bug_id in (commit.get("matched_release_bug_ids", []) if isinstance(commit, dict) else [])
+                    if str(bug_id).strip()
+                }
+            )
+            mapped_release_cves = sorted(
+                {
+                    str(cve_id)
+                    for commit in commits
+                    for cve_id in (commit.get("mapped_release_cves", []) if isinstance(commit, dict) else [])
+                    if str(cve_id).strip()
+                }
+            )
+
+            files = [item for item in compare_payload.get("files", []) or [] if isinstance(item, dict)]
+            if strict_bug_scope_active:
+                scoped_shas = [
+                    str(commit.get("sha", "") or "").strip()
+                    for commit in commits
+                    if isinstance(commit, dict) and str(commit.get("sha", "") or "").strip()
+                ]
+                if scoped_shas:
+                    scoped_files, scoped_file_warnings = source.get_files_for_commit_shas(
+                        commit_shas=scoped_shas,
+                        base_ref=resolved_ref.base_ref,
+                        head_ref=resolved_ref.head_ref,
+                        component=component,
+                    )
+                    compare_warnings.extend(scoped_file_warnings)
+                    if scoped_files:
+                        files = scoped_files
+                    else:
+                        compare_warnings.append(
+                            "Mapped commit file lookup returned no files; falling back to full compare diff files."
+                        )
+                else:
+                    compare_warnings.append(
+                        "Mapped commit scope produced no commit SHAs; falling back to full compare diff files."
+                    )
+
             warnings.extend([f"[{component.value}] {item}" for item in compare_warnings])
 
-            commits = [asdict(item) for item in compare_payload.get("commits", []) or []]
-            files = [item for item in compare_payload.get("files", []) or [] if isinstance(item, dict)]
             component_directories, component_directory_counts = self._extract_directory_hierarchy(files)
             total_commits_api = int(compare_payload.get("total_commits", 0) or 0)
             total_files_api = int(compare_payload.get("total_files", 0) or 0)
@@ -587,6 +752,8 @@ class AnalysisService:
                         "strategy": resolved_ref.strategy,
                     },
                     "warnings": compare_warnings,
+                    "matched_release_bug_ids": matched_bug_ids,
+                    "mapped_release_cves": mapped_release_cves,
                     "commits": commits,
                     "files": files,
                     "available_directories": component_directories,
@@ -630,6 +797,7 @@ class AnalysisService:
                     "keyword": keyword,
                     "hard_keywords": list(hard_keywords),
                     "soft_keywords": list(soft_keywords),
+                    "soft_path_hints": list(soft_path_hints),
                     "evidence_tokens": list(evidence_tokens),
                     "strict_commit_platform": bool(strict_commit_platform),
                     "strict_file_platform": bool(strict_file_platform),
@@ -642,9 +810,10 @@ class AnalysisService:
         )
 
     def _resolve_effective_components(self, payload: AnalysisRequest) -> list[CompareComponent]:
-        if payload.minimal_mode:
+        normalized_components = self._normalize_components(payload.components)
+        if payload.minimal_mode and len(normalized_components) == 1 and normalized_components[0] == CompareComponent.CHROME:
             return [CompareComponent.CHROME]
-        return self._normalize_components(payload.components)
+        return normalized_components
 
     def _split_keywords(self, value: str) -> list[str]:
         raw = str(value or "").strip().lower()
@@ -686,7 +855,14 @@ class AnalysisService:
             return ""
         return f"https://github.com/{repo_path}/compare/{base_version}...{head_version}"
 
-    def _build_security_evidence_tokens(self, *, cve_id: str, references: list[str], description: str) -> list[str]:
+    def _build_security_evidence_tokens(
+        self,
+        *,
+        cve_id: str,
+        references: list[str],
+        description: str,
+        extra_issue_ids: list[str] | None = None,
+    ) -> list[str]:
         tokens = [str(cve_id or "").strip()]
         issue_ids: set[str] = set()
 
@@ -699,17 +875,155 @@ class AnalysisService:
         for match in re.findall(r"(?:crbug|bug)\s*[:#/]?\s*(\d{6,})", str(description or ""), flags=re.IGNORECASE):
             issue_ids.add(match)
 
+        for item in extra_issue_ids or []:
+            normalized = re.sub(r"\D", "", str(item or "").strip())
+            if re.fullmatch(r"\d{6,}", normalized):
+                issue_ids.add(normalized)
+
         for issue_id in sorted(issue_ids):
             tokens.extend(
                 [
                     issue_id,
                     f"issues.chromium.org/issues/{issue_id}",
+                    f"crbug.com/{issue_id}",
                     f"crbug/{issue_id}",
                     f"bug:{issue_id}",
                 ]
             )
 
         return self._dedupe(tokens)
+
+    def _infer_release_focus_keywords(self, *, security_fixes: list[dict[str, str]], cve_id: str) -> list[str]:
+        target_cve = str(cve_id or "").strip().upper()
+        if not target_cve:
+            return []
+
+        snippets: list[str] = []
+        for item in security_fixes:
+            if not isinstance(item, dict):
+                continue
+            mapped_cve = str(item.get("cve_id", "") or "").strip().upper()
+            if mapped_cve != target_cve:
+                continue
+
+            title = str(item.get("title", "") or "").strip()
+            severity = str(item.get("severity", "") or "").strip()
+            if title:
+                snippets.append(title)
+                if severity:
+                    snippets.append(f"{severity} {title}")
+
+        if not snippets:
+            return []
+
+        return infer_focus_keywords(" ".join(snippets), "", limit=10)
+
+    def _infer_soft_path_hints(self, *, cve_title: str, cve_description: str, keywords: list[str]) -> list[str]:
+        corpus = "\n".join(
+            [
+                str(cve_title or ""),
+                str(cve_description or ""),
+                " ".join([str(item or "") for item in (keywords or [])]),
+            ]
+        ).lower()
+
+        hints: list[str] = []
+        for trigger, values in self._SOFT_PATH_HINTS_BY_TOKEN.items():
+            if str(trigger).lower() in corpus:
+                hints.extend(values)
+
+        normalized_hints = [str(item or "").strip().lower().lstrip("/") for item in hints if str(item or "").strip()]
+        return self._dedupe(normalized_hints)
+
+    def _collect_release_security_fixes(self, posts: list[dict[str, Any]]) -> list[dict[str, str]]:
+        collected: list[dict[str, str]] = []
+        seen: set[tuple[str, str, str]] = set()
+
+        for post in posts:
+            if not isinstance(post, dict):
+                continue
+
+            post_title = str(post.get("title", "") or "").strip()
+            post_url = str(post.get("url", "") or "").strip()
+
+            for item in post.get("security_fixes", []) or []:
+                if not isinstance(item, dict):
+                    continue
+
+                bug_id = str(item.get("bug_id", "") or "").strip()
+                cve_id = str(item.get("cve_id", "") or "").strip().upper()
+                title = str(item.get("title", "") or "").strip()
+                severity = str(item.get("severity", "") or "").strip().title()
+                status_tag = str(item.get("status_tag", "") or "").strip().upper()
+
+                if not bug_id or not cve_id:
+                    continue
+
+                dedupe_key = (bug_id, cve_id, title)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+
+                collected.append(
+                    {
+                        "bug_id": bug_id,
+                        "cve_id": cve_id,
+                        "severity": severity,
+                        "title": title,
+                        "status_tag": status_tag,
+                        "post_title": post_title,
+                        "post_url": post_url,
+                    }
+                )
+
+        return collected
+
+    def _build_release_bug_map(self, security_fixes: list[dict[str, str]]) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        conflicts: set[str] = set()
+
+        for item in security_fixes:
+            if not isinstance(item, dict):
+                continue
+
+            bug_id = str(item.get("bug_id", "") or "").strip()
+            cve_id = str(item.get("cve_id", "") or "").strip().upper()
+            if not bug_id or not cve_id:
+                continue
+
+            existing = mapping.get(bug_id)
+            if existing is None:
+                mapping[bug_id] = cve_id
+                continue
+
+            if existing != cve_id:
+                conflicts.add(bug_id)
+
+        for bug_id in conflicts:
+            mapping.pop(bug_id, None)
+
+        return mapping
+
+    def _annotate_release_bug_cve_mappings(self, commits: list[dict[str, Any]], release_bug_map: dict[str, str]) -> None:
+        bug_ids = set(str(key).strip() for key in release_bug_map.keys() if str(key).strip())
+        if not bug_ids:
+            return
+
+        for commit in commits:
+            if not isinstance(commit, dict):
+                continue
+
+            haystack = (
+                f"{str(commit.get('title', '') or '')}\n"
+                f"{str(commit.get('message', '') or '')}\n"
+                f"{str(commit.get('url', '') or '')}"
+            )
+            numeric_tokens = set(re.findall(r"\d{6,}", haystack))
+            matched_bug_ids = sorted(token for token in numeric_tokens if token in bug_ids)
+            mapped_cves = sorted({release_bug_map[token] for token in matched_bug_ids if token in release_bug_map})
+
+            commit["matched_release_bug_ids"] = matched_bug_ids
+            commit["mapped_release_cves"] = mapped_cves
 
     def _extract_directory_hierarchy(self, files: list[dict[str, Any]]) -> tuple[list[str], list[dict[str, int]]]:
         directory_counts: dict[str, int] = {}

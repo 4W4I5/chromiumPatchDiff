@@ -16,7 +16,7 @@ from web.services import AnalysisService, CveEnrichmentService, VersionCatalogSe
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Chromium Patch Diff Web",
-        version="2.0.2",
+        version="2.0.5",
         summary="Web-based CVE and Chromium patched/unpatched diff explorer",
     )
 

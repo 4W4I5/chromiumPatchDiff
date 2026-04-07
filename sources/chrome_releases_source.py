@@ -19,6 +19,13 @@ class ChromeReleasesSource:
     _LOG_URL_HINT = "chromium.googlesource.com/chromium/src/+log/"
     _CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", flags=re.IGNORECASE)
     _VERSION_PATTERN = re.compile(r"\d+\.\d+\.\d+\.\d+")
+    _SECURITY_FIX_CVE_LINE_PATTERN = re.compile(
+        r"^(?:(?P<severity>Critical|High|Medium|Low)\s+)?"
+        r"(?P<cve>CVE-\d{4}-\d{4,7})\s*:\s*(?P<title>.+?)\s*$",
+        flags=re.IGNORECASE,
+    )
+    _SECURITY_FIX_BUG_LINK_PATTERN = re.compile(r"issues\.chromium\.org/issues/(?P<bug_id>\d{5,})", flags=re.IGNORECASE)
+    _SECURITY_FIX_STATUS_TAG_PATTERN = re.compile(r"\[(?P<status>TBD|NA)\]\[", flags=re.IGNORECASE)
 
     def __init__(
         self,
@@ -172,9 +179,12 @@ class ChromeReleasesSource:
                     url = href
                     break
 
-        text_blob = f"{title}\n{self._html_to_text(content_html)}"
+        content_text = self._html_to_text(content_html)
+        text_blob = f"{title}\n{content_text}"
         matched_cves = sorted({match.upper() for match in self._CVE_PATTERN.findall(text_blob)})
         log_links = self._extract_log_links(content_html)
+        security_fixes = self._extract_security_fixes(content_html=content_html, content_text=content_text)
+        matched_bug_ids = sorted({str(item.get("bug_id", "") or "") for item in security_fixes if str(item.get("bug_id", "") or "")})
 
         return {
             "id": str((entry.get("id") or {}).get("$t", "") if isinstance(entry.get("id"), dict) else ""),
@@ -184,6 +194,8 @@ class ChromeReleasesSource:
             "updated": str((entry.get("updated") or {}).get("$t", "") if isinstance(entry.get("updated"), dict) else ""),
             "categories": categories,
             "matched_cves": matched_cves,
+            "matched_bug_ids": matched_bug_ids,
+            "security_fixes": security_fixes,
             "log_links": log_links,
         }
 
@@ -241,6 +253,60 @@ class ChromeReleasesSource:
             seen_urls.add(normalized_url)
 
         return links
+
+    def _extract_security_fixes(self, *, content_html: str, content_text: str) -> list[dict[str, str]]:
+        fixes: list[dict[str, str]] = []
+        seen: set[tuple[str, str, str]] = set()
+
+        decoded_html = html.unescape(str(content_html or ""))
+        issue_ids = [match.group("bug_id") for match in self._SECURITY_FIX_BUG_LINK_PATTERN.finditer(decoded_html)]
+        status_tags = [match.group("status").upper() for match in self._SECURITY_FIX_STATUS_TAG_PATTERN.finditer(decoded_html)]
+
+        cve_rows: list[dict[str, str]] = []
+        for raw_line in str(content_text or "").splitlines():
+            line = str(raw_line or "").strip()
+            if not line:
+                continue
+
+            match = self._SECURITY_FIX_CVE_LINE_PATTERN.match(line)
+            if not match:
+                continue
+
+            cve_rows.append(
+                {
+                    "cve_id": str(match.group("cve") or "").strip().upper(),
+                    "severity": str(match.group("severity") or "").strip().title(),
+                    "title": re.sub(r"\s+", " ", str(match.group("title") or "").strip()),
+                }
+            )
+
+        pair_count = min(len(issue_ids), len(cve_rows))
+        for index in range(pair_count):
+            bug_id = str(issue_ids[index] or "").strip()
+            cve_id = str(cve_rows[index].get("cve_id", "") or "").strip().upper()
+            severity = str(cve_rows[index].get("severity", "") or "").strip().title()
+            title = str(cve_rows[index].get("title", "") or "").strip()
+            row_tag = status_tags[index] if index < len(status_tags) else ""
+
+            if not bug_id or not cve_id:
+                continue
+
+            dedupe_key = (bug_id, cve_id, title)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+
+            fixes.append(
+                {
+                    "bug_id": bug_id,
+                    "cve_id": cve_id,
+                    "severity": severity,
+                    "title": title,
+                    "status_tag": row_tag,
+                }
+            )
+
+        return fixes
 
     def _extract_versions_from_log_url(self, url: str) -> tuple[str, str]:
         normalized_url = html.unescape(str(url or "").strip())
