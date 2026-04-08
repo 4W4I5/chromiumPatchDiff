@@ -21,8 +21,7 @@ class ChromeReleasesSource:
     _CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", flags=re.IGNORECASE)
     _VERSION_PATTERN = re.compile(r"\d+\.\d+\.\d+\.\d+")
     _SECURITY_FIX_CVE_LINE_PATTERN = re.compile(
-        r"^(?:(?P<severity>Critical|High|Medium|Low)\s+)?"
-        r"(?P<cve>CVE-\d{4}-\d{4,7})\s*:\s*(?P<title>.+?)\s*$",
+        r"^(?:(?P<severity>Critical|High|Medium|Low)\s+)?" r"(?P<cve>CVE-\d{4}-\d{4,7})\s*:\s*(?P<title>.+?)\s*$",
         flags=re.IGNORECASE,
     )
     _SECURITY_FIX_BUG_LINK_PATTERN = re.compile(r"issues\.chromium\.org/issues/(?P<bug_id>\d{5,})", flags=re.IGNORECASE)
@@ -100,12 +99,7 @@ class ChromeReleasesSource:
                 cache_metadata["cache_status"] = "fallback_stale"
                 cache_metadata["used_stale_cache"] = True
                 fallback_warnings = self._coerce_cached_warnings(cached_payload.get("warnings", []))
-                fallback_warnings.append(
-                    (
-                        f"Chrome Releases upstream lookup failed ({status}); using cached feed data "
-                        f"for {normalized_cve_id}."
-                    )
-                )
+                fallback_warnings.append((f"Chrome Releases upstream lookup failed ({status}); using cached feed data " f"for {normalized_cve_id}."))
                 return (
                     self._coerce_cached_posts(cached_payload.get("posts", [])),
                     self._dedupe(fallback_warnings),
@@ -184,10 +178,7 @@ class ChromeReleasesSource:
         posts.sort(key=lambda item: self._timestamp_sort_key(item.get("published", "")), reverse=True)
 
         if not posts:
-            warnings.append(
-                f"No Stable Desktop Chrome Releases posts were matched for {cve_id}; "
-                "fallback resolver will be used."
-            )
+            warnings.append(f"No Stable Desktop Chrome Releases posts were matched for {cve_id}; " "fallback resolver will be used.")
 
         return posts, warnings
 
@@ -356,10 +347,7 @@ class ChromeReleasesSource:
             if exact_matches:
                 selected = max(exact_matches, key=self._candidate_sort_key)
                 return selected, warnings
-            warnings.append(
-                "Version hint did not match any Log head version in Chrome Releases posts; "
-                "using latest matched range."
-            )
+            warnings.append("Version hint did not match any Log head version in Chrome Releases posts; " "using latest matched range.")
 
         selected = max(candidates, key=self._candidate_sort_key)
         return selected, warnings

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
-import re
 from typing import Any, Callable
 
 from chrome import Chrome
@@ -11,8 +11,8 @@ from config import CompareComponent, PipelineConfig, resolve_component_repo
 from models import CveRecord
 from pipeline.orchestrator import EnrichmentOrchestrator
 from sources.chrome_releases_source import ChromeReleasesSource
-from sources.component_ref_resolver import ChromiumComponentRefResolver
 from sources.chromium_source import ChromiumMirrorSource
+from sources.component_ref_resolver import ChromiumComponentRefResolver
 from sources.cve_utils import infer_focus_keywords
 from web.schemas import AnalysisRequest, InputMode
 from web.services.cve_enrichment import CveEnrichmentService
@@ -175,13 +175,11 @@ class AnalysisService:
                     }
                 )
                 patched_provenance.append(
-                    "Patched/unpatched versions resolved from Chrome Releases Log range "
-                    f"{unpatched_version}..{patched_version}."
+                    "Patched/unpatched versions resolved from Chrome Releases Log range " f"{unpatched_version}..{patched_version}."
                 )
             else:
                 patched_warnings.append(
-                    "Chrome Releases Log range was found but did not expose a parseable base/head version; "
-                    "falling back to CVE metadata inference."
+                    "Chrome Releases Log range was found but did not expose a parseable base/head version; " "falling back to CVE metadata inference."
                 )
 
         if not patched_version:
@@ -204,10 +202,7 @@ class AnalysisService:
             patched_warnings.extend(patched_warnings_fallback)
 
             if not patched_version:
-                raise ValueError(
-                    "Could not resolve a patched Chromium version from CVE metadata. "
-                    "Provide an explicit version input to continue."
-                )
+                raise ValueError("Could not resolve a patched Chromium version from CVE metadata. " "Provide an explicit version input to continue.")
 
         progress(
             36,
@@ -496,12 +491,16 @@ class AnalysisService:
         return result
 
     def _enrich_cve_result_for_docx(self, *, result: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
-        cve_id = str(
-            metadata.get("cve_id")
-            or ((result.get("input") or {}).get("cve_id") if isinstance(result.get("input"), dict) else "")
-            or ((result.get("cve") or {}).get("cve_id") if isinstance(result.get("cve"), dict) else "")
-            or ""
-        ).strip().upper()
+        cve_id = (
+            str(
+                metadata.get("cve_id")
+                or ((result.get("input") or {}).get("cve_id") if isinstance(result.get("input"), dict) else "")
+                or ((result.get("cve") or {}).get("cve_id") if isinstance(result.get("cve"), dict) else "")
+                or ""
+            )
+            .strip()
+            .upper()
+        )
         include_nvd = bool(metadata.get("include_nvd", True))
         context_version = str(metadata.get("context_version") or result.get("patched_version") or "").strip()
 
@@ -617,11 +616,7 @@ class AnalysisService:
         }
         normalized_target_cve = str(target_cve_id or "").strip().upper()
         normalized_query_bug_ids = sorted(
-            {
-                re.sub(r"\D", "", str(item or "").strip())
-                for item in (query_cve_bug_ids or [])
-                if re.sub(r"\D", "", str(item or "").strip())
-            }
+            {re.sub(r"\D", "", str(item or "").strip()) for item in (query_cve_bug_ids or []) if re.sub(r"\D", "", str(item or "").strip())}
         )
 
         if not selected_components:
@@ -642,9 +637,7 @@ class AnalysisService:
             resolved_ref = resolved_refs.get(component)
 
             if resolved_ref is None:
-                component_warning = (
-                    "Component compare skipped because base/head refs could not be resolved from Chromium DEPS."
-                )
+                component_warning = "Component compare skipped because base/head refs could not be resolved from Chromium DEPS."
                 warnings.append(f"[{component.value}] {component_warning}")
                 component_results.append(
                     {
@@ -732,11 +725,7 @@ class AnalysisService:
                         commit["matches_query_cve"] = normalized_target_cve in mapped_cves
 
                     if strict_bug_scope_requested:
-                        query_mapped = [
-                            commit
-                            for commit in commits
-                            if isinstance(commit, dict) and bool(commit.get("matches_query_cve", False))
-                        ]
+                        query_mapped = [commit for commit in commits if isinstance(commit, dict) and bool(commit.get("matches_query_cve", False))]
                         if query_mapped:
                             commits = query_mapped
                         else:
@@ -781,13 +770,9 @@ class AnalysisService:
                     if scoped_files:
                         files = scoped_files
                     else:
-                        compare_warnings.append(
-                            "Mapped commit file lookup returned no files; falling back to full compare diff files."
-                        )
+                        compare_warnings.append("Mapped commit file lookup returned no files; falling back to full compare diff files.")
                 else:
-                    compare_warnings.append(
-                        "Mapped commit scope produced no commit SHAs; falling back to full compare diff files."
-                    )
+                    compare_warnings.append("Mapped commit scope produced no commit SHAs; falling back to full compare diff files.")
 
             warnings.extend([f"[{component.value}] {item}" for item in compare_warnings])
 
@@ -856,14 +841,10 @@ class AnalysisService:
                 directory = str(row.get("directory", "") or "").strip()
                 if not directory:
                     continue
-                aggregate_directory_counts[directory] = aggregate_directory_counts.get(directory, 0) + int(
-                    row.get("file_count", 0) or 0
-                )
+                aggregate_directory_counts[directory] = aggregate_directory_counts.get(directory, 0) + int(row.get("file_count", 0) or 0)
 
         available_directories = sorted(aggregate_directory_counts.keys(), key=self._directory_sort_key)
-        directory_file_counts = [
-            {"directory": item, "file_count": aggregate_directory_counts[item]} for item in available_directories
-        ]
+        directory_file_counts = [{"directory": item, "file_count": aggregate_directory_counts[item]} for item in available_directories]
 
         return (
             {
@@ -1098,11 +1079,7 @@ class AnalysisService:
             if not isinstance(commit, dict):
                 continue
 
-            haystack = (
-                f"{str(commit.get('title', '') or '')}\n"
-                f"{str(commit.get('message', '') or '')}\n"
-                f"{str(commit.get('url', '') or '')}"
-            )
+            haystack = f"{str(commit.get('title', '') or '')}\n" f"{str(commit.get('message', '') or '')}\n" f"{str(commit.get('url', '') or '')}"
             numeric_tokens = set(re.findall(r"\d{6,}", haystack))
             matched_bug_ids = sorted(token for token in numeric_tokens if token in bug_ids)
             mapped_cves = sorted({release_bug_map[token] for token in matched_bug_ids if token in release_bug_map})
