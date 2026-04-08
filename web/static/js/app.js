@@ -68,6 +68,8 @@ if (advancedToggleBtn) {
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
 
+  window.scrollTo({ top: 0, behavior: "smooth" });
+
   stopPolling();
   resetView();
 
@@ -848,6 +850,7 @@ function renderReleaseBlog(releaseBlog) {
 
   const payload = (releaseBlog && typeof releaseBlog === "object") ? releaseBlog : {};
   const posts = Array.isArray(payload.posts) ? payload.posts : [];
+  const cache = (payload.cache && typeof payload.cache === "object") ? payload.cache : null;
   const selected = (payload.selected_log_range && typeof payload.selected_log_range === "object")
     ? payload.selected_log_range
     : null;
@@ -856,6 +859,16 @@ function renderReleaseBlog(releaseBlog) {
   summary.className = "release-summary";
   summary.textContent = `${posts.length} Stable Desktop post(s) matched.`;
   releaseBlogNode.appendChild(summary);
+
+  if (cache) {
+    const cacheLine = document.createElement("p");
+    cacheLine.className = "mono";
+    const status = String(cache.cache_status || "unknown");
+    const cachedAt = String(cache.cached_at || "").trim();
+    const feedUpdatedAt = String(cache.feed_updated_at || "").trim();
+    cacheLine.textContent = `cache_status=${status}${cachedAt ? ` cached_at=${cachedAt}` : ""}${feedUpdatedAt ? ` feed_updated_at=${feedUpdatedAt}` : ""}`;
+    releaseBlogNode.appendChild(cacheLine);
+  }
 
   const queryBugIds = Array.isArray(payload.query_cve_bug_ids) ? payload.query_cve_bug_ids : [];
   if (queryBugIds.length) {

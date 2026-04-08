@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -13,6 +14,9 @@ from web.routes import api_router, pages_router
 from web.services import AnalysisService, CveEnrichmentService, VersionCatalogService
 
 
+_LOGGER = logging.getLogger(__name__)
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Chromium Patch Diff Web",
@@ -24,6 +28,14 @@ def create_app() -> FastAPI:
     templates = Jinja2Templates(directory=str(base_dir / "templates"))
 
     config = PipelineConfig.from_env()
+    if not config.cve_api_key:
+        _LOGGER.warning("CVE_API_KEY is not configured; authenticated CVE Services lookups may be skipped.")
+    if config.cve_mode.value == "authenticated" and not config.has_cve_credentials:
+        _LOGGER.warning(
+            "CVE_SOURCE_MODE=authenticated but required credentials are incomplete. "
+            "Set CVE_API_USER, CVE_API_ORG, and CVE_API_KEY."
+        )
+
     version_catalog_service = VersionCatalogService(config)
     cve_enrichment_service = CveEnrichmentService(config)
     analysis_service = AnalysisService(config, version_catalog_service, cve_enrichment_service)

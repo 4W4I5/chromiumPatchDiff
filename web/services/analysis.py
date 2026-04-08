@@ -91,7 +91,7 @@ class AnalysisService:
 
         progress(22, "Searching Chrome Releases Stable Desktop posts for CVE")
         release_source = ChromeReleasesSource(HttpClient(self._config), self._config)
-        release_posts, release_warnings = release_source.search_stable_desktop_posts_for_cve(
+        release_posts, release_warnings, release_cache_meta = release_source.search_stable_desktop_posts_for_cve(
             normalized_cve_id,
             max_results=40,
         )
@@ -123,10 +123,29 @@ class AnalysisService:
             "security_fix_count": len(release_security_fixes),
             "security_fixes": release_security_fixes,
             "query_cve_bug_ids": release_bug_ids_for_query,
+            "cache": release_cache_meta,
         }
 
         patched_version = ""
         unpatched_version = ""
+        patched_version_details: dict[str, Any] = {
+            "stage": "patched",
+            "selected_version": "",
+            "confidence_tier": "UNKNOWN",
+            "confidence_score": 0.0,
+            "source": "",
+            "strategy": "",
+            "not_provable_reasons": [],
+        }
+        unpatched_version_details: dict[str, Any] = {
+            "stage": "unpatched",
+            "selected_version": "",
+            "confidence_tier": "UNKNOWN",
+            "confidence_score": 0.0,
+            "source": "",
+            "strategy": "",
+            "not_provable_reasons": [],
+        }
         patched_provenance: list[str] = []
         patched_warnings: list[str] = []
         predecessor_warnings: list[str] = []
@@ -137,6 +156,24 @@ class AnalysisService:
             if patched_from_log and unpatched_from_log:
                 patched_version = patched_from_log
                 unpatched_version = unpatched_from_log
+                patched_version_details.update(
+                    {
+                        "selected_version": patched_version,
+                        "confidence_tier": "EXACT",
+                        "confidence_score": 1.0,
+                        "source": "chrome-releases-log-range",
+                        "strategy": "selected-log-head-version",
+                    }
+                )
+                unpatched_version_details.update(
+                    {
+                        "selected_version": unpatched_version,
+                        "confidence_tier": "EXACT",
+                        "confidence_score": 1.0,
+                        "source": "chrome-releases-log-range",
+                        "strategy": "selected-log-base-version",
+                    }
+                )
                 patched_provenance.append(
                     "Patched/unpatched versions resolved from Chrome Releases Log range "
                     f"{unpatched_version}..{patched_version}."
@@ -153,7 +190,12 @@ class AnalysisService:
             if payload.version:
                 patched_candidates.insert(0, payload.version)
 
-            patched_version, patched_provenance_fallback, patched_warnings_fallback = self._version_catalog_service.resolve_patched_version(
+            (
+                patched_version,
+                patched_provenance_fallback,
+                patched_warnings_fallback,
+                patched_version_details,
+            ) = self._version_catalog_service.resolve_patched_version(
                 patched_candidates,
                 published=cve_record.published,
                 updated=cve_record.updated,
@@ -182,7 +224,11 @@ class AnalysisService:
 
         if not unpatched_version:
             progress(48, "Inferring latest unpatched predecessor")
-            unpatched_version, predecessor_warnings = self._version_catalog_service.find_previous_version(patched_version)
+            (
+                unpatched_version,
+                predecessor_warnings,
+                unpatched_version_details,
+            ) = self._version_catalog_service.find_previous_version(patched_version)
             if not unpatched_version:
                 raise ValueError(f"Unable to infer a predecessor version for patched version {patched_version}.")
 
@@ -261,7 +307,25 @@ class AnalysisService:
                 "include_nvd": payload.include_nvd,
             },
             "patched_version": patched_version,
+            "patched_version_details": patched_version_details,
             "unpatched_version": unpatched_version,
+            "unpatched_version_details": unpatched_version_details,
+            "version_resolution": {
+                "patched": patched_version_details,
+                "unpatched": unpatched_version_details,
+                "not_provable": [
+                    *[
+                        str(item)
+                        for item in (patched_version_details.get("not_provable_reasons", []) if isinstance(patched_version_details, dict) else [])
+                        if str(item).strip()
+                    ],
+                    *[
+                        str(item)
+                        for item in (unpatched_version_details.get("not_provable_reasons", []) if isinstance(unpatched_version_details, dict) else [])
+                        if str(item).strip()
+                    ],
+                ],
+            },
             "cve": cve_record.to_dict(include_raw=False),
             "release_blog": release_blog_payload,
             "enrichment_deferred": True,
@@ -303,9 +367,19 @@ class AnalysisService:
             raise ValueError(f"Invalid Chromium version: {exc}") from exc
 
         progress(16, "Inferring predecessor version from merged catalog")
-        predecessor_version, predecessor_warnings = self._version_catalog_service.find_previous_version(normalized_version)
+        predecessor_version, predecessor_warnings, predecessor_details = self._version_catalog_service.find_previous_version(normalized_version)
         if not predecessor_version:
             raise ValueError(f"Unable to infer predecessor for version {normalized_version}.")
+
+        patched_version_details = {
+            "stage": "patched",
+            "selected_version": normalized_version,
+            "confidence_tier": "EXACT",
+            "confidence_score": 1.0,
+            "source": "user-input-version",
+            "strategy": "explicit-version-mode-input",
+            "not_provable_reasons": [],
+        }
 
         effective_components = self._resolve_effective_components(payload)
         manual_keywords = self._split_keywords(payload.keyword)
@@ -363,7 +437,18 @@ class AnalysisService:
                 "limit": payload.limit,
             },
             "patched_version": normalized_version,
+            "patched_version_details": patched_version_details,
             "unpatched_version": predecessor_version,
+            "unpatched_version_details": predecessor_details,
+            "version_resolution": {
+                "patched": patched_version_details,
+                "unpatched": predecessor_details,
+                "not_provable": [
+                    str(item)
+                    for item in (predecessor_details.get("not_provable_reasons", []) if isinstance(predecessor_details, dict) else [])
+                    if str(item).strip()
+                ],
+            },
             "primary_cve": primary_cve,
             "enrichment": enrichment_result,
             "enrichment_deferred": True,

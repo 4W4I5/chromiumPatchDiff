@@ -87,6 +87,14 @@ class PipelineConfig:
     source_content_cache_ttl_seconds: int = 21600
     source_content_max_bytes: int = 350000
 
+    chrome_releases_cache_enabled: bool = True
+    chrome_releases_cache_file: str = ".cache/chrome_releases.json"
+    chrome_releases_cache_soft_ttl_seconds: int = 21600
+    chrome_releases_cache_hard_ttl_seconds: int = 604800
+    chrome_releases_cache_fallback_on_rate_limit_or_unreachable: bool = True
+
+    enable_version_confidence_tiers: bool = True
+
     @classmethod
     def from_env(cls) -> "PipelineConfig":
         mode_value = os.getenv("CVE_SOURCE_MODE", SourceMode.AUTO.value).strip().lower()
@@ -97,6 +105,11 @@ class PipelineConfig:
 
         github_default_interval = "2.0" if github_token else "7.0"
         nvd_default_interval = "2.0" if nvd_api_key else "7.0"
+        chrome_releases_soft_ttl_seconds = max(60, int(os.getenv("CHROME_RELEASES_CACHE_SOFT_TTL_SECONDS", "21600")))
+        chrome_releases_hard_ttl_seconds = max(
+            chrome_releases_soft_ttl_seconds,
+            int(os.getenv("CHROME_RELEASES_CACHE_HARD_TTL_SECONDS", "604800")),
+        )
 
         return cls(
             cve_mode=mode,
@@ -107,7 +120,7 @@ class PipelineConfig:
             ).strip(),
             cve_api_user=os.getenv("CVE_API_USER", "").strip(),
             cve_api_org=os.getenv("CVE_API_ORG", "").strip(),
-            cve_api_key=os.getenv("CVE_API_KEY", "4672f95b-5f92-419a-b4c0-3bff7efeda0a").strip(),
+            cve_api_key=os.getenv("CVE_API_KEY", "").strip(),
             github_api_base=os.getenv("GITHUB_API_BASE", "https://api.github.com").strip(),
             github_repo=os.getenv("GITHUB_REPO", "chromium/chromium").strip(),
             github_token=github_token,
@@ -134,6 +147,15 @@ class PipelineConfig:
             source_content_cache_file=os.getenv("SOURCE_CONTENT_CACHE_FILE", ".cache/source_contents.json").strip(),
             source_content_cache_ttl_seconds=max(60, int(os.getenv("SOURCE_CONTENT_CACHE_TTL_SECONDS", "21600"))),
             source_content_max_bytes=max(10000, int(os.getenv("SOURCE_CONTENT_MAX_BYTES", "350000"))),
+            chrome_releases_cache_enabled=_env_bool("CHROME_RELEASES_CACHE_ENABLED", True),
+            chrome_releases_cache_file=os.getenv("CHROME_RELEASES_CACHE_FILE", ".cache/chrome_releases.json").strip(),
+            chrome_releases_cache_soft_ttl_seconds=chrome_releases_soft_ttl_seconds,
+            chrome_releases_cache_hard_ttl_seconds=chrome_releases_hard_ttl_seconds,
+            chrome_releases_cache_fallback_on_rate_limit_or_unreachable=_env_bool(
+                "CHROME_RELEASES_CACHE_FALLBACK_ON_RATE_LIMIT_OR_UNREACHABLE",
+                True,
+            ),
+            enable_version_confidence_tiers=_env_bool("ENABLE_VERSION_CONFIDENCE_TIERS", True),
         )
 
     @property

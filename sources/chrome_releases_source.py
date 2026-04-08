@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import html
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from bs4 import BeautifulSoup
 
+from clients.cache_store import FileCacheStore
 from clients.http_client import HttpClient
 from config import PipelineConfig
 
@@ -36,27 +37,122 @@ class ChromeReleasesSource:
         self._http = http
         self._config = config
         self._logger = logger
+        self._cache: FileCacheStore | None = None
+        if self._config.cache_enabled and self._config.chrome_releases_cache_enabled:
+            self._cache = FileCacheStore(
+                self._config.chrome_releases_cache_file,
+                enabled=True,
+            )
 
     def search_stable_desktop_posts_for_cve(
         self,
         cve_id: str,
         max_results: int = 25,
-    ) -> tuple[list[dict[str, Any]], list[str]]:
+    ) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
         normalized_cve_id = str(cve_id or "").strip().upper()
+        normalized_max_results = max(1, min(100, int(max_results or 25)))
         warnings: list[str] = []
+        cache_key = self._build_cache_key(normalized_cve_id, normalized_max_results)
+        cache_metadata = {
+            "enabled": self._cache is not None,
+            "cache_key": cache_key if self._cache is not None else "",
+            "cache_status": "disabled" if self._cache is None else "miss",
+            "cached_at": "",
+            "feed_updated_at": "",
+            "upstream_checked_at": "",
+            "used_stale_cache": False,
+        }
 
         if not re.fullmatch(r"CVE-\d{4}-\d{4,7}", normalized_cve_id):
-            return [], [f"Invalid CVE ID format for Chrome Releases lookup: {cve_id}"]
+            cache_metadata["cache_status"] = "bypass"
+            return [], [f"Invalid CVE ID format for Chrome Releases lookup: {cve_id}"], cache_metadata
+
+        cached_payload = self._load_cached_entry(cache_key)
+        if cached_payload is not None:
+            cache_metadata["cached_at"] = str(cached_payload.get("cached_at", "") or "")
+            cache_metadata["feed_updated_at"] = str(cached_payload.get("feed_updated_at", "") or "")
+
+            cached_at = self._parse_iso_datetime(str(cached_payload.get("cached_at", "") or ""))
+            if cached_at is not None:
+                age_seconds = (datetime.now(timezone.utc) - cached_at).total_seconds()
+                if age_seconds <= float(self._config.chrome_releases_cache_soft_ttl_seconds):
+                    cache_metadata["cache_status"] = "hit"
+                    return (
+                        self._coerce_cached_posts(cached_payload.get("posts", [])),
+                        self._coerce_cached_warnings(cached_payload.get("warnings", [])),
+                        cache_metadata,
+                    )
 
         params = {
             "alt": "json",
             "q": normalized_cve_id,
-            "max-results": str(max(1, min(100, int(max_results or 25)))),
+            "max-results": str(normalized_max_results),
         }
 
+        cache_metadata["upstream_checked_at"] = datetime.now(timezone.utc).isoformat()
         status, payload, error = self._http.try_get_json(self._FEED_URL, params=params)
         if status >= 400 or not isinstance(payload, dict):
-            return [], [f"Chrome Releases feed lookup failed for {normalized_cve_id}: {error}"]
+            if (
+                cached_payload is not None
+                and self._config.chrome_releases_cache_fallback_on_rate_limit_or_unreachable
+                and self._is_rate_limited_or_unreachable(status=status, payload=payload, error=error)
+            ):
+                cache_metadata["cache_status"] = "fallback_stale"
+                cache_metadata["used_stale_cache"] = True
+                fallback_warnings = self._coerce_cached_warnings(cached_payload.get("warnings", []))
+                fallback_warnings.append(
+                    (
+                        f"Chrome Releases upstream lookup failed ({status}); using cached feed data "
+                        f"for {normalized_cve_id}."
+                    )
+                )
+                return (
+                    self._coerce_cached_posts(cached_payload.get("posts", [])),
+                    self._dedupe(fallback_warnings),
+                    cache_metadata,
+                )
+
+            cache_metadata["cache_status"] = "upstream_error"
+            return [], [f"Chrome Releases feed lookup failed for {normalized_cve_id}: {error}"], cache_metadata
+
+        current_feed_updated_at = self._extract_feed_updated_at(payload)
+        if cached_payload is not None:
+            cached_feed_updated_at = str(cached_payload.get("feed_updated_at", "") or "")
+            if cached_feed_updated_at and cached_feed_updated_at == current_feed_updated_at:
+                refreshed_posts = self._coerce_cached_posts(cached_payload.get("posts", []))
+                refreshed_warnings = self._coerce_cached_warnings(cached_payload.get("warnings", []))
+                self._store_cached_entry(
+                    cache_key=cache_key,
+                    cve_id=normalized_cve_id,
+                    max_results=normalized_max_results,
+                    posts=refreshed_posts,
+                    warnings=refreshed_warnings,
+                    feed_updated_at=current_feed_updated_at,
+                )
+
+                cache_metadata["cache_status"] = "validated_unchanged"
+                cache_metadata["feed_updated_at"] = current_feed_updated_at
+                cache_metadata["cached_at"] = datetime.now(timezone.utc).isoformat()
+                return refreshed_posts, refreshed_warnings, cache_metadata
+
+        posts, warnings = self._extract_posts_from_payload(payload=payload, cve_id=normalized_cve_id)
+
+        self._store_cached_entry(
+            cache_key=cache_key,
+            cve_id=normalized_cve_id,
+            max_results=normalized_max_results,
+            posts=posts,
+            warnings=warnings,
+            feed_updated_at=current_feed_updated_at,
+        )
+
+        cache_metadata["cache_status"] = "refresh" if cached_payload is not None else "miss"
+        cache_metadata["feed_updated_at"] = current_feed_updated_at
+        cache_metadata["cached_at"] = datetime.now(timezone.utc).isoformat()
+        return posts, warnings, cache_metadata
+
+    def _extract_posts_from_payload(self, *, payload: dict[str, Any], cve_id: str) -> tuple[list[dict[str, Any]], list[str]]:
+        warnings: list[str] = []
 
         feed = payload.get("feed", {}) if isinstance(payload.get("feed"), dict) else {}
         entries = feed.get("entry", [])
@@ -64,7 +160,7 @@ class ChromeReleasesSource:
             entries = [entries]
 
         if not isinstance(entries, list) or not entries:
-            warnings.append(f"Chrome Releases feed returned no entries for {normalized_cve_id}.")
+            warnings.append(f"Chrome Releases feed returned no entries for {cve_id}.")
             return [], warnings
 
         posts: list[dict[str, Any]] = []
@@ -80,7 +176,7 @@ class ChromeReleasesSource:
                 continue
 
             cves = [item.upper() for item in parsed.get("matched_cves", [])]
-            if normalized_cve_id not in cves:
+            if cve_id not in cves:
                 continue
 
             posts.append(parsed)
@@ -89,11 +185,134 @@ class ChromeReleasesSource:
 
         if not posts:
             warnings.append(
-                f"No Stable Desktop Chrome Releases posts were matched for {normalized_cve_id}; "
+                f"No Stable Desktop Chrome Releases posts were matched for {cve_id}; "
                 "fallback resolver will be used."
             )
 
         return posts, warnings
+
+    def _build_cache_key(self, cve_id: str, max_results: int) -> str:
+        return f"chrome-releases:{str(cve_id or '').strip().upper()}|max-results:{int(max_results)}"
+
+    def _load_cached_entry(self, cache_key: str) -> dict[str, Any] | None:
+        if self._cache is None:
+            return None
+
+        payload = self._cache.get(cache_key)
+        if not isinstance(payload, dict):
+            return None
+
+        return payload
+
+    def _store_cached_entry(
+        self,
+        *,
+        cache_key: str,
+        cve_id: str,
+        max_results: int,
+        posts: list[dict[str, Any]],
+        warnings: list[str],
+        feed_updated_at: str,
+    ) -> None:
+        if self._cache is None:
+            return
+
+        cache_payload = {
+            "query_cve_id": str(cve_id or "").strip().upper(),
+            "max_results": int(max_results),
+            "cached_at": datetime.now(timezone.utc).isoformat(),
+            "feed_updated_at": str(feed_updated_at or ""),
+            "posts": posts,
+            "warnings": self._dedupe(warnings),
+        }
+
+        self._cache.set(
+            cache_key,
+            cache_payload,
+            ttl_seconds=self._config.chrome_releases_cache_hard_ttl_seconds,
+        )
+
+    def _extract_feed_updated_at(self, payload: dict[str, Any]) -> str:
+        feed = payload.get("feed", {}) if isinstance(payload.get("feed"), dict) else {}
+        updated = feed.get("updated") if isinstance(feed.get("updated"), dict) else {}
+        value = str(updated.get("$t", "") if isinstance(updated, dict) else "").strip()
+        if value:
+            return value
+
+        entries = feed.get("entry", [])
+        if isinstance(entries, dict):
+            entries = [entries]
+
+        if isinstance(entries, list):
+            newest = ""
+            newest_key = 0.0
+            for item in entries:
+                if not isinstance(item, dict):
+                    continue
+                updated_payload = item.get("updated") if isinstance(item.get("updated"), dict) else {}
+                updated_value = str(updated_payload.get("$t", "") if isinstance(updated_payload, dict) else "").strip()
+                if not updated_value:
+                    continue
+                sort_key = self._timestamp_sort_key(updated_value)
+                if sort_key >= newest_key:
+                    newest = updated_value
+                    newest_key = sort_key
+            return newest
+
+        return ""
+
+    def _parse_iso_datetime(self, value: str) -> datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+
+        normalized = raw.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _coerce_cached_posts(self, payload: Any) -> list[dict[str, Any]]:
+        if not isinstance(payload, list):
+            return []
+        return [item for item in payload if isinstance(item, dict)]
+
+    def _coerce_cached_warnings(self, payload: Any) -> list[str]:
+        if not isinstance(payload, list):
+            return []
+        return [str(item) for item in payload if str(item or "").strip()]
+
+    def _is_rate_limited_or_unreachable(self, *, status: int, payload: Any, error: str | None) -> bool:
+        if status == 0:
+            return True
+        if status in (429, 502, 503, 504):
+            return True
+
+        message = ""
+        if isinstance(payload, dict):
+            message = str(payload.get("message", "") or "").lower()
+        if not message:
+            message = str(error or "").lower()
+
+        if status == 403 and ("rate limit" in message or "abuse" in message):
+            return True
+
+        network_hints = ("timed out", "timeout", "connection", "temporarily unavailable", "dns")
+        return any(hint in message for hint in network_hints)
+
+    def _dedupe(self, items: list[str]) -> list[str]:
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for item in items:
+            normalized = str(item or "").strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                deduped.append(normalized)
+        return deduped
 
     def select_preferred_log_range(
         self,

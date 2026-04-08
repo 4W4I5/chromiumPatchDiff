@@ -132,6 +132,7 @@ The completed result includes, among other fields:
 - notes (informational pipeline notes, such as deferred enrichment)
 
 Filter behavior notes:
+
 - `keyword` / manual keywords are treated as hard filters.
 - Auto CVE focus keywords are treated as soft ranking signals.
 - In CVE mode with platform selected, commit/file platform matching is relaxed to a ranking signal by default, then CVE soft-focus file matching is applied with fallback to hard-filtered files when needed.
@@ -175,7 +176,7 @@ If not found, local source is skipped with warnings.
 - CVE_PUBLIC_SEARCH_URL_TEMPLATE
 - CVE_API_USER
 - CVE_API_ORG
-- CVE_API_KEY
+- CVE_API_KEY (no built-in default; set explicitly for authenticated mode)
 
 ### GitHub
 
@@ -204,6 +205,15 @@ If not found, local source is skipped with warnings.
 - PIPELINE_CACHE_ENABLED
 - ENRICHED_CACHE_FILE
 - ENRICHED_CACHE_TTL_SECONDS
+- ENABLE_VERSION_CONFIDENCE_TIERS
+
+### Chrome Releases Cache
+
+- CHROME_RELEASES_CACHE_ENABLED
+- CHROME_RELEASES_CACHE_FILE
+- CHROME_RELEASES_CACHE_SOFT_TTL_SECONDS
+- CHROME_RELEASES_CACHE_HARD_TTL_SECONDS
+- CHROME_RELEASES_CACHE_FALLBACK_ON_RATE_LIMIT_OR_UNREACHABLE
 
 ## Web UI Notes
 

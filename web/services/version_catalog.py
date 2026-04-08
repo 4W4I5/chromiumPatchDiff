@@ -108,16 +108,33 @@ class VersionCatalogService:
         *,
         published: str = "",
         updated: str = "",
-    ) -> tuple[str, list[str], list[str]]:
+    ) -> tuple[str, list[str], list[str], dict[str, Any]]:
         versions, releases, warnings, source_versions = self.get_catalog()
         provenance: list[str] = []
         local_warnings: list[str] = list(warnings)
+        confidence_enabled = bool(self._config.enable_version_confidence_tiers)
 
         normalized_candidates = self._normalize_candidate_versions(candidates)
+        details = self._build_resolution_details(
+            stage="patched",
+            candidates=normalized_candidates,
+            catalog_versions=versions,
+            source_versions=source_versions,
+        )
+
         for candidate in normalized_candidates:
             if candidate in versions:
                 provenance.append(f"Patched version resolved from CVE data and validated in merged catalog: {candidate}")
-                return candidate, provenance, local_warnings
+                details.update(
+                    {
+                        "selected_version": candidate,
+                        "confidence_tier": "HIGH" if confidence_enabled else "LEGACY",
+                        "confidence_score": 0.95,
+                        "source": "merged-version-catalog",
+                        "strategy": "candidate-present-in-merged-catalog",
+                    }
+                )
+                return candidate, provenance, local_warnings, details
 
             if candidate in source_versions.get("chromium_tags", set()) or candidate in source_versions.get("github_tags", set()):
                 provenance.append(
@@ -126,7 +143,16 @@ class VersionCatalogService:
                 local_warnings.append(
                     f"ChromiumDash stable/extended did not include patched candidate {candidate}; accepted from tag sources per fallback policy."
                 )
-                return candidate, provenance, local_warnings
+                details.update(
+                    {
+                        "selected_version": candidate,
+                        "confidence_tier": "MEDIUM" if confidence_enabled else "LEGACY",
+                        "confidence_score": 0.75,
+                        "source": "chromium-or-github-tags",
+                        "strategy": "candidate-present-in-tag-sources",
+                    }
+                )
+                return candidate, provenance, local_warnings, details
 
         if releases:
             dash_source = ChromiumDashSource(HttpClient(self._config), self._config)
@@ -136,21 +162,44 @@ class VersionCatalogService:
                 local_warnings.append(
                     "Patched version inferred heuristically from release dates because explicit CVE patched boundary could not be confirmed."
                 )
-                return nearest, provenance, local_warnings
+                details.update(
+                    {
+                        "selected_version": nearest,
+                        "confidence_tier": "LOW" if confidence_enabled else "LEGACY",
+                        "confidence_score": 0.5,
+                        "source": "chromiumdash-release-timeline",
+                        "strategy": "nearest-release-by-date",
+                    }
+                )
+                return nearest, provenance, local_warnings, details
 
         local_warnings.append("Unable to resolve patched Chromium version from CVE metadata or release sources.")
-        return "", provenance, local_warnings
+        details["not_provable_reasons"].append("No patched boundary candidate was verifiable from catalogs/tags/release timeline.")
+        return "", provenance, local_warnings, details
 
-    def find_previous_version(self, patched_version: str) -> tuple[str, list[str]]:
+    def find_previous_version(self, patched_version: str) -> tuple[str, list[str], dict[str, Any]]:
         normalized_patched = self.normalize_version(patched_version)
         versions, _, warnings, _ = self.get_catalog()
+        confidence_enabled = bool(self._config.enable_version_confidence_tiers)
+        details = {
+            "stage": "unpatched",
+            "input_version": normalized_patched,
+            "selected_version": "",
+            "confidence_tier": "UNKNOWN",
+            "confidence_score": 0.0,
+            "source": "merged-version-catalog",
+            "strategy": "",
+            "not_provable_reasons": [],
+        }
 
         if not normalized_patched:
-            return "", ["Patched version is empty after normalization."]
+            details["not_provable_reasons"].append("Patched version is empty after normalization.")
+            return "", ["Patched version is empty after normalization."], details
 
         lower_versions = [version for version in versions if self._compare_versions(version, normalized_patched) < 0]
         if not lower_versions:
-            return "", warnings + [f"No version lower than patched version {normalized_patched} was found."]
+            details["not_provable_reasons"].append(f"No version lower than patched version {normalized_patched} was found.")
+            return "", warnings + [f"No version lower than patched version {normalized_patched} was found."], details
 
         patched_parts = normalized_patched.split(".")
         branch_build_prefix = ".".join(patched_parts[:3])
@@ -158,13 +207,65 @@ class VersionCatalogService:
 
         same_build = [version for version in lower_versions if version.startswith(f"{branch_build_prefix}.")]
         if same_build:
-            return max(same_build, key=self._version_sort_key), warnings
+            selected = max(same_build, key=self._version_sort_key)
+            details.update(
+                {
+                    "selected_version": selected,
+                    "confidence_tier": "MEDIUM" if confidence_enabled else "LEGACY",
+                    "confidence_score": 0.65,
+                    "strategy": "same-major-minor-build-predecessor",
+                }
+            )
+            return selected, warnings, details
 
         same_branch = [version for version in lower_versions if version.startswith(f"{branch_minor_prefix}.")]
         if same_branch:
-            return max(same_branch, key=self._version_sort_key), warnings
+            selected = max(same_branch, key=self._version_sort_key)
+            details.update(
+                {
+                    "selected_version": selected,
+                    "confidence_tier": "LOW" if confidence_enabled else "LEGACY",
+                    "confidence_score": 0.55,
+                    "strategy": "same-major-minor-predecessor",
+                }
+            )
+            return selected, warnings, details
 
-        return max(lower_versions, key=self._version_sort_key), warnings
+        selected = max(lower_versions, key=self._version_sort_key)
+        details.update(
+            {
+                "selected_version": selected,
+                "confidence_tier": "LOW" if confidence_enabled else "LEGACY",
+                "confidence_score": 0.45,
+                "strategy": "global-highest-lower-version",
+            }
+        )
+        return selected, warnings, details
+
+    def _build_resolution_details(
+        self,
+        *,
+        stage: str,
+        candidates: list[str],
+        catalog_versions: list[str],
+        source_versions: dict[str, set[str]],
+    ) -> dict[str, Any]:
+        return {
+            "stage": stage,
+            "selected_version": "",
+            "confidence_tier": "UNKNOWN",
+            "confidence_score": 0.0,
+            "source": "",
+            "strategy": "",
+            "candidates_considered": list(candidates),
+            "catalog_status": {
+                "merged_version_count": len(catalog_versions),
+                "chromiumdash_version_count": len(source_versions.get("chromiumdash", set())),
+                "chromium_tags_count": len(source_versions.get("chromium_tags", set())),
+                "github_tags_count": len(source_versions.get("github_tags", set())),
+            },
+            "not_provable_reasons": [],
+        }
 
     def _normalize_candidate_versions(self, candidates: list[str]) -> list[str]:
         seen: set[str] = set()

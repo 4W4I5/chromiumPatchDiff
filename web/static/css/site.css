@@ -90,6 +90,10 @@ body {
   grid-template-columns: minmax(310px, 360px) 1fr;
 }
 
+.grid > * {
+  min-width: 0;
+}
+
 .form-card,
 .results-card {
   padding: 1rem;
@@ -188,6 +192,8 @@ button:disabled {
   border: 1px dashed #c6ddcf;
   border-radius: 10px;
   background: #f9fdfb;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .component-box {
@@ -254,6 +260,7 @@ button:disabled {
   max-height: 160px;
   overflow: auto;
   padding-right: 0.25rem;
+  min-width: 0;
 }
 
 .muted-note {
@@ -271,6 +278,11 @@ button:disabled {
   background: #fff;
   color: var(--ink);
   cursor: pointer;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  text-align: left;
 }
 
 .chip-button:hover {
@@ -328,6 +340,7 @@ button:disabled {
   border-radius: 9px;
   padding: 0.55rem 0.6rem;
   background: #f6fbf8;
+  min-width: 0;
 }
 
 .summary-item strong {
@@ -348,6 +361,7 @@ button:disabled {
   border-radius: 9px;
   padding: 0.5rem 0.55rem;
   background: #eef9f2;
+  min-width: 0;
 }
 
 .focus-chip strong {
@@ -384,6 +398,7 @@ button:disabled {
   display: grid;
   gap: 0.3rem;
   margin-bottom: 0.7rem;
+  min-width: 0;
 }
 
 .release-selected p {
@@ -400,10 +415,13 @@ button:disabled {
   border-radius: 10px;
   padding: 0.6rem;
   background: #fff;
+  min-width: 0;
 }
 
 .release-card > a {
   font-weight: 600;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .release-meta {
@@ -427,6 +445,7 @@ button:disabled {
   padding: 0.7rem;
   margin-bottom: 0.8rem;
   background: linear-gradient(170deg, #fcfffd, #f4faf7);
+  min-width: 0;
 }
 
 .component-head {
@@ -434,15 +453,22 @@ button:disabled {
   justify-content: space-between;
   align-items: baseline;
   gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .component-head h4 {
   margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .mono {
   font-family: var(--font-mono);
   font-size: 0.85rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .details-grid {
@@ -456,6 +482,7 @@ button:disabled {
   border-radius: 8px;
   background: #fff;
   padding: 0.45rem;
+  min-width: 0;
 }
 
 .file-actions {
@@ -502,6 +529,8 @@ button:disabled {
 details summary {
   cursor: pointer;
   color: var(--muted);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .diff-count-add {
@@ -562,10 +591,19 @@ pre.diff-preview {
   gap: 0.45rem;
   border-bottom: 1px solid var(--edge);
   padding-bottom: 0.35rem;
+  min-width: 0;
 }
 
 .table-row strong {
   color: var(--muted);
+}
+
+.summary-item span,
+.focus-chip span,
+.release-selected p,
+.table-row span {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 @media (max-width: 1024px) {
