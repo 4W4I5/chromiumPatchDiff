@@ -608,6 +608,7 @@ class AnalysisService:
     ) -> tuple[dict[str, Any], list[str]]:
         warnings: list[str] = []
         component_results: list[dict[str, Any]] = []
+        release_timeline_cache: list[tuple[datetime, str]] | None = None
         selected_components = self._normalize_components(components or payload.components)
         normalized_release_bug_map = {
             str(bug_id).strip(): str(cve_id).strip().upper()
@@ -657,6 +658,7 @@ class AnalysisService:
                         "filter_metrics": {
                             "total_files_from_api": 0,
                             "after_platform_filter": 0,
+                            "excluded_non_selected_platform": 0,
                             "after_path_prefix_filter": 0,
                             "after_extension_filter": 0,
                             "after_keyword_filter": 0,
@@ -664,6 +666,9 @@ class AnalysisService:
                             "commit_confidence_fallback_applied": False,
                             "soft_file_focus_fallback_applied": False,
                         },
+                        "excluded_file_count": 0,
+                        "excluded_files_truncated": False,
+                        "excluded_files": [],
                         "resolved_refs": {
                             "base": "",
                             "head": "",
@@ -705,6 +710,7 @@ class AnalysisService:
                 soft_path_hints=soft_path_hints,
                 strict_commit_platform=component_strict_commit_platform,
                 strict_file_platform=component_strict_file_platform,
+                exclude_other_platform_files=str(getattr(payload.platform, "value", "")).strip().lower() != "all",
                 soft_file_focus=soft_file_focus,
                 min_commit_confidence=min_commit_confidence,
             )
@@ -712,6 +718,8 @@ class AnalysisService:
             commits = [asdict(item) for item in compare_payload.get("commits", []) or []]
             strict_bug_scope_requested = bool(normalized_release_bug_map and normalized_target_cve and normalized_query_bug_ids)
             strict_bug_scope_active = strict_bug_scope_requested
+            full_compare_fallback_applied = False
+            full_compare_fallback_reasons: list[str] = []
             if normalized_release_bug_map and commits:
                 self._annotate_release_bug_cve_mappings(commits, normalized_release_bug_map)
 
@@ -734,6 +742,8 @@ class AnalysisService:
                                 "falling back to full compare diff."
                             )
                             strict_bug_scope_active = False
+                            full_compare_fallback_applied = True
+                            full_compare_fallback_reasons.append("no_commits_mapped_to_query_cve")
 
             matched_bug_ids = sorted(
                 {
@@ -771,8 +781,66 @@ class AnalysisService:
                         files = scoped_files
                     else:
                         compare_warnings.append("Mapped commit file lookup returned no files; falling back to full compare diff files.")
+                        full_compare_fallback_applied = True
+                        full_compare_fallback_reasons.append("mapped_commit_files_empty")
                 else:
                     compare_warnings.append("Mapped commit scope produced no commit SHAs; falling back to full compare diff files.")
+                    full_compare_fallback_applied = True
+                    full_compare_fallback_reasons.append("mapped_commit_scope_empty")
+
+            fallback_version_hint: dict[str, Any] = {
+                "applied": False,
+                "suggested_chromium_version": "",
+                "suggested_build_number": "",
+                "suggested_patch_number": "",
+                "strategy": "",
+                "reason": "",
+                "commit_hint_count": 0,
+            }
+            if full_compare_fallback_applied and commits:
+                if release_timeline_cache is None:
+                    release_timeline_cache = self._load_release_timeline_for_commit_hints()
+
+                hinted_commits = 0
+                best_hint: dict[str, Any] = {}
+                for commit in commits:
+                    if not isinstance(commit, dict):
+                        continue
+                    hint = self._resolve_commit_version_hint(
+                        commit=commit,
+                        release_timeline=release_timeline_cache,
+                        compare_base_version=base_version,
+                        compare_head_version=head_version,
+                    )
+                    if not hint:
+                        continue
+
+                    hinted_commits += 1
+                    commit["chromium_version_hint"] = str(hint.get("version", "") or "")
+                    commit["chromium_build_hint"] = str(hint.get("build_number", "") or "")
+                    commit["chromium_patch_hint"] = str(hint.get("patch_number", "") or "")
+                    commit["chromium_version_hint_strategy"] = str(hint.get("strategy", "") or "")
+                    commit["chromium_version_hint_confidence"] = float(hint.get("confidence", 0.0) or 0.0)
+
+                    if not best_hint and commit.get("chromium_version_hint"):
+                        best_hint = hint
+                        continue
+
+                    best_confidence = float(best_hint.get("confidence", 0.0) or 0.0)
+                    this_confidence = float(hint.get("confidence", 0.0) or 0.0)
+                    if this_confidence > best_confidence:
+                        best_hint = hint
+
+                if hinted_commits and best_hint:
+                    fallback_version_hint = {
+                        "applied": True,
+                        "suggested_chromium_version": str(best_hint.get("version", "") or ""),
+                        "suggested_build_number": str(best_hint.get("build_number", "") or ""),
+                        "suggested_patch_number": str(best_hint.get("patch_number", "") or ""),
+                        "strategy": str(best_hint.get("strategy", "") or ""),
+                        "reason": ",".join(self._dedupe(full_compare_fallback_reasons)),
+                        "commit_hint_count": hinted_commits,
+                    }
 
             warnings.extend([f"[{component.value}] {item}" for item in compare_warnings])
 
@@ -816,11 +884,15 @@ class AnalysisService:
                         "truncated": bool(compare_payload.get("truncated", False)),
                     },
                     "filter_metrics": compare_payload.get("filter_metrics", {}),
+                    "excluded_file_count": int(compare_payload.get("excluded_file_count", 0) or 0),
+                    "excluded_files_truncated": bool(compare_payload.get("excluded_files_truncated", False)),
+                    "excluded_files": [item for item in (compare_payload.get("excluded_files", []) or []) if isinstance(item, dict)],
                     "resolved_refs": {
                         "base": resolved_ref.base_ref,
                         "head": resolved_ref.head_ref,
                         "strategy": resolved_ref.strategy,
                     },
+                    "fallback_version_hint": fallback_version_hint,
                     "warnings": compare_warnings,
                     "matched_release_bug_ids": matched_bug_ids,
                     "mapped_release_cves": mapped_release_cves,
@@ -1110,6 +1182,180 @@ class AnalysisService:
     def _directory_sort_key(self, directory: str) -> tuple[int, str]:
         normalized = str(directory or "").strip().lower()
         return (normalized.count("/"), normalized)
+
+    def _load_release_timeline_for_commit_hints(self) -> list[tuple[datetime, str]]:
+        timeline: list[tuple[datetime, str]] = []
+        _, releases, _, _ = self._version_catalog_service.get_catalog()
+
+        for item in releases:
+            if not isinstance(item, dict):
+                continue
+
+            version = self._extract_version_from_release_item(item)
+            release_time = self._extract_release_datetime(item)
+            if not version or release_time is None:
+                continue
+            timeline.append((release_time, version))
+
+        timeline.sort(key=lambda row: row[0])
+        return timeline
+
+    def _resolve_commit_version_hint(
+        self,
+        *,
+        commit: dict[str, Any],
+        release_timeline: list[tuple[datetime, str]],
+        compare_base_version: str,
+        compare_head_version: str,
+    ) -> dict[str, Any]:
+        normalized_compare_base = self._normalize_full_version(compare_base_version)
+        normalized_compare_head = self._normalize_full_version(compare_head_version)
+
+        title = str(commit.get("title", "") or "")
+        message = str(commit.get("message", "") or "")
+        url = str(commit.get("url", "") or "")
+        haystack = f"{title}\n{message}\n{url}"
+
+        exact_match = re.search(r"\b(\d+\.\d+\.\d+\.\d+)\b", haystack)
+        if exact_match:
+            exact_version = str(exact_match.group(1) or "").strip()
+            exact_hint = self._build_version_hint_payload(
+                version=exact_version,
+                strategy="exact_version_from_commit_text",
+                confidence=0.95,
+            )
+            if exact_hint and self._is_version_in_compare_window(
+                version=str(exact_hint.get("version", "") or ""),
+                compare_base_version=normalized_compare_base,
+                compare_head_version=normalized_compare_head,
+            ):
+                return exact_hint
+
+        commit_date = self._parse_datetime_value(str(commit.get("date", "") or ""))
+        if commit_date is not None and release_timeline:
+            older_or_equal = [item for item in release_timeline if item[0] <= commit_date]
+            if older_or_equal:
+                version = older_or_equal[-1][1]
+                timeline_hint = self._build_version_hint_payload(
+                    version=version,
+                    strategy="most_recent_release_on_or_before_commit_date",
+                    confidence=0.8,
+                )
+                if timeline_hint and self._is_version_in_compare_window(
+                    version=str(timeline_hint.get("version", "") or ""),
+                    compare_base_version=normalized_compare_base,
+                    compare_head_version=normalized_compare_head,
+                ):
+                    return timeline_hint
+
+            nearest = min(release_timeline, key=lambda item: abs((item[0] - commit_date).total_seconds()))
+            nearest_hint = self._build_version_hint_payload(
+                version=nearest[1],
+                strategy="nearest_release_by_commit_date",
+                confidence=0.65,
+            )
+            if nearest_hint and self._is_version_in_compare_window(
+                version=str(nearest_hint.get("version", "") or ""),
+                compare_base_version=normalized_compare_base,
+                compare_head_version=normalized_compare_head,
+            ):
+                return nearest_hint
+
+        if str(compare_head_version or "").strip():
+            return self._build_version_hint_payload(
+                version=str(compare_head_version).strip(),
+                strategy="compare_head_version_fallback",
+                confidence=0.5,
+            )
+
+        return {}
+
+    def _build_version_hint_payload(self, *, version: str, strategy: str, confidence: float) -> dict[str, Any]:
+        normalized_version = self._version_catalog_service.normalize_version(version)
+        if not re.fullmatch(r"\d+\.\d+\.\d+\.\d+", normalized_version):
+            return {}
+
+        parts = normalized_version.split(".")
+        return {
+            "version": normalized_version,
+            "build_number": parts[2] if len(parts) > 2 else "",
+            "patch_number": parts[3] if len(parts) > 3 else "",
+            "strategy": strategy,
+            "confidence": float(max(0.0, min(1.0, confidence))),
+        }
+
+    def _extract_version_from_release_item(self, item: dict[str, Any]) -> str:
+        candidates = [
+            str(item.get("version", "") or "").strip(),
+            str(item.get("milestone_version", "") or "").strip(),
+            str(item.get("chromium_version", "") or "").strip(),
+            str(item),
+        ]
+
+        for candidate in candidates:
+            matched = re.search(r"\b(\d+\.\d+\.\d+\.\d+)\b", candidate)
+            if matched:
+                return str(matched.group(1) or "")
+        return ""
+
+    def _extract_release_datetime(self, item: dict[str, Any]) -> datetime | None:
+        for key in (
+            "time",
+            "timestamp",
+            "date",
+            "publish_time",
+            "release_date",
+            "serving_start",
+            "serving_start_time",
+        ):
+            parsed = self._parse_datetime_value(str(item.get(key, "") or ""))
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _parse_datetime_value(self, value: str) -> datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _normalize_full_version(self, value: str) -> str:
+        normalized = self._version_catalog_service.normalize_version(value)
+        return normalized if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", normalized) else ""
+
+    def _is_version_in_compare_window(self, *, version: str, compare_base_version: str, compare_head_version: str) -> bool:
+        target = self._normalize_full_version(version)
+        if not target:
+            return False
+
+        base = self._normalize_full_version(compare_base_version)
+        head = self._normalize_full_version(compare_head_version)
+        if not base or not head:
+            # If bounds are unavailable, avoid dropping plausible hints.
+            return True
+
+        target_key = self._version_sort_key(target)
+        lower = min(self._version_sort_key(base), self._version_sort_key(head))
+        upper = max(self._version_sort_key(base), self._version_sort_key(head))
+        return lower <= target_key <= upper
+
+    def _version_sort_key(self, version: str) -> tuple[int, int, int, int]:
+        try:
+            parts = [int(item) for item in str(version or "").split(".") if item.strip()]
+        except ValueError:
+            return (0, 0, 0, 0)
+
+        while len(parts) < 4:
+            parts.append(0)
+        return tuple(parts[:4])
 
     def _dedupe(self, items: list[str]) -> list[str]:
         seen: set[str] = set()

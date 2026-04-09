@@ -16,6 +16,7 @@ from models import CommitEvidence
 
 class ChromiumMirrorSource:
     name = "chromium-github-mirror"
+    _EXCLUDED_FILES_PREVIEW_LIMIT = 200
     _SECURITY_ID_RE = re.compile(
         r"(CVE-\d{4}-\d{4,7}|issues\.chromium\.org/issues/\d+|crbug(?:\.com|\s*[:/#]?\s*)\d{5,})",
         flags=re.IGNORECASE,
@@ -41,6 +42,7 @@ class ChromiumMirrorSource:
         ComparePlatform.MACOS: ("mac", "macos", "darwin"),
         ComparePlatform.ANDROID: ("android", "play services", "chromium android"),
     }
+    _IOS_PATH_RULES: tuple[str, ...] = ("ios/", "iphone", "ipad", "cocoa_touch", "tvos/", "watchos/")
     _PDFIUM_GOOGLESOURCE_BASE = "https://pdfium.googlesource.com/pdfium"
 
     def __init__(
@@ -274,6 +276,7 @@ class ChromiumMirrorSource:
         soft_path_hints: list[str] | None = None,
         strict_commit_platform: bool = True,
         strict_file_platform: bool = True,
+        exclude_other_platform_files: bool = False,
         soft_file_focus: bool = False,
         min_commit_confidence: float = 0.0,
         max_results: int = 250,
@@ -293,6 +296,7 @@ class ChromiumMirrorSource:
                 "filter_metrics": {
                     "total_files_from_api": 0,
                     "after_platform_filter": 0,
+                    "excluded_non_selected_platform": 0,
                     "after_path_prefix_filter": 0,
                     "after_extension_filter": 0,
                     "after_keyword_filter": 0,
@@ -308,12 +312,12 @@ class ChromiumMirrorSource:
                 "platform": platform.value,
                 "component": component.value,
                 "release_channel": "",
+                "excluded_file_count": 0,
+                "excluded_files": [],
+                "excluded_files_truncated": False,
             }, warnings
 
-        endpoint = (
-            f"{self._config.github_api_base}/repos/{self._config.github_repo}"
-            f"/compare/{normalized_base_ref}...{normalized_head_ref}"
-        )
+        endpoint = f"{self._config.github_api_base}/repos/{self._config.github_repo}" f"/compare/{normalized_base_ref}...{normalized_head_ref}"
         self._throttle_github_requests()
         status, payload, response_headers, error = self._http.try_get_json_with_headers(
             endpoint,
@@ -354,6 +358,7 @@ class ChromiumMirrorSource:
                         "filter_metrics": {
                             "total_files_from_api": 0,
                             "after_platform_filter": 0,
+                            "excluded_non_selected_platform": 0,
                             "after_path_prefix_filter": 0,
                             "after_extension_filter": 0,
                             "after_keyword_filter": 0,
@@ -369,6 +374,9 @@ class ChromiumMirrorSource:
                         "platform": platform.value,
                         "component": component.value,
                         "release_channel": "",
+                        "excluded_file_count": 0,
+                        "excluded_files": [],
+                        "excluded_files_truncated": False,
                     }, warnings
             else:
                 if compare_rate_limit_warning:
@@ -385,6 +393,7 @@ class ChromiumMirrorSource:
                     "filter_metrics": {
                         "total_files_from_api": 0,
                         "after_platform_filter": 0,
+                        "excluded_non_selected_platform": 0,
                         "after_path_prefix_filter": 0,
                         "after_extension_filter": 0,
                         "after_keyword_filter": 0,
@@ -400,6 +409,9 @@ class ChromiumMirrorSource:
                     "platform": platform.value,
                     "component": component.value,
                     "release_channel": "",
+                    "excluded_file_count": 0,
+                    "excluded_files": [],
+                    "excluded_files_truncated": False,
                 }, warnings
 
         normalized_prefixes = [item.strip().lower().lstrip("/") for item in (path_prefixes or []) if item.strip()]
@@ -477,9 +489,7 @@ class ChromiumMirrorSource:
 
             commit_confidence_fallback_applied = False
             if min_commit_confidence > 0:
-                above_threshold = [
-                    item for item in compare_commits if float(item.confidence or 0.0) >= min_commit_confidence
-                ]
+                above_threshold = [item for item in compare_commits if float(item.confidence or 0.0) >= min_commit_confidence]
                 if above_threshold:
                     compare_commits = above_threshold
                 elif normalized_soft_keywords or normalized_evidence_tokens:
@@ -500,11 +510,14 @@ class ChromiumMirrorSource:
         candidate_files: list[tuple[dict[str, Any], bool]] = []
         raw_files = payload.get("files", []) or []
         files_after_platform_filter = 0
+        files_excluded_non_selected_platform = 0
         files_after_path_prefix_filter = 0
         files_after_extension_filter = 0
         files_after_keyword_filter = 0
         files_after_soft_focus_filter = 0
         soft_file_focus_fallback_applied = False
+        excluded_files: list[dict[str, str]] = []
+        excluded_files_truncated = False
         for file_payload in raw_files:
             if not isinstance(file_payload, dict):
                 continue
@@ -512,6 +525,22 @@ class ChromiumMirrorSource:
             filename = str(file_payload.get("filename", "") or "")
             patch = str(file_payload.get("patch", "") or "")
             lowered_filename = filename.lower().lstrip("/")
+
+            if platform != ComparePlatform.ALL and exclude_other_platform_files:
+                excluded_keywords = self._matching_non_selected_platform_keywords(lowered_filename, platform)
+                if excluded_keywords:
+                    files_excluded_non_selected_platform += 1
+                    if len(excluded_files) < self._EXCLUDED_FILES_PREVIEW_LIMIT:
+                        excluded_files.append(
+                            {
+                                "filename": filename,
+                                "reason": "non-selected-platform-keyword",
+                                "matched_keywords": ", ".join(excluded_keywords[:6]),
+                            }
+                        )
+                    else:
+                        excluded_files_truncated = True
+                    continue
 
             path_matches_platform = self._path_matches_platform(lowered_filename, platform)
             if platform != ComparePlatform.ALL and strict_file_platform and not path_matches_platform:
@@ -597,9 +626,7 @@ class ChromiumMirrorSource:
                     f"evidence_tokens={len(normalized_evidence_tokens)})."
                 )
             else:
-                warnings.append(
-                    f"GitHub compare returned no commits for range {normalized_base_ref}...{normalized_head_ref}."
-                )
+                warnings.append(f"GitHub compare returned no commits for range {normalized_base_ref}...{normalized_head_ref}.")
         if platform != ComparePlatform.ALL and strict_file_platform and not compare_files:
             warnings.append(
                 "No changed files matched platform filter "
@@ -618,6 +645,7 @@ class ChromiumMirrorSource:
             "filter_metrics": {
                 "total_files_from_api": len(raw_files),
                 "after_platform_filter": files_after_platform_filter,
+                "excluded_non_selected_platform": files_excluded_non_selected_platform,
                 "after_path_prefix_filter": files_after_path_prefix_filter,
                 "after_extension_filter": files_after_extension_filter,
                 "after_keyword_filter": files_after_keyword_filter,
@@ -637,9 +665,13 @@ class ChromiumMirrorSource:
             "soft_path_hints": normalized_soft_path_hints,
             "strict_commit_platform": bool(strict_commit_platform),
             "strict_file_platform": bool(strict_file_platform),
+            "exclude_other_platform_files": bool(exclude_other_platform_files),
             "soft_file_focus": bool(soft_file_focus),
             "min_commit_confidence": min_commit_confidence,
             "release_channel": "",
+            "excluded_file_count": files_excluded_non_selected_platform,
+            "excluded_files": excluded_files,
+            "excluded_files_truncated": bool(excluded_files_truncated),
         }, warnings
 
     def get_files_for_commit_shas(
@@ -927,6 +959,31 @@ class ChromiumMirrorSource:
             return False
 
         return any(rule in lowered_path for rule in rules)
+
+    def _matching_non_selected_platform_keywords(self, lowered_path: str, selected_platform: ComparePlatform) -> list[str]:
+        if selected_platform == ComparePlatform.ALL:
+            return []
+
+        candidates: list[str] = []
+        for platform_key, rules in self._PLATFORM_PATH_RULES.items():
+            if platform_key == selected_platform:
+                continue
+            candidates.extend(rules)
+
+        # iOS keywords are useful to suppress when user selects a non-iOS target platform.
+        candidates.extend(self._IOS_PATH_RULES)
+
+        lowered = str(lowered_path or "")
+        matches = [token for token in candidates if token and token in lowered]
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for token in matches:
+            if token in seen:
+                continue
+            seen.add(token)
+            deduped.append(token)
+        return deduped
 
     def _message_matches_platform(self, message: str, platform: ComparePlatform) -> bool:
         if platform == ComparePlatform.ALL:

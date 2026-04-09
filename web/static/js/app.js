@@ -739,7 +739,8 @@ function renderCompare(compare) {
 
     const stats = document.createElement("span");
     stats.className = "mono";
-    stats.textContent = `commits=${component.commit_count || 0} files=${component.file_count || 0}`;
+    const excludedFileCount = Number(component.excluded_file_count || 0);
+    stats.textContent = `commits=${component.commit_count || 0} files=${component.file_count || 0} excluded=${excludedFileCount}`;
 
     head.appendChild(title);
     head.appendChild(stats);
@@ -764,6 +765,22 @@ function renderCompare(compare) {
       card.appendChild(mappedLine);
     }
 
+    const fallbackHint = (component.fallback_version_hint && typeof component.fallback_version_hint === "object")
+      ? component.fallback_version_hint
+      : null;
+    if (fallbackHint && fallbackHint.applied) {
+      const fallbackLine = document.createElement("p");
+      fallbackLine.className = "mono";
+
+      const hintedVersion = String(fallbackHint.suggested_chromium_version || "").trim();
+      const hintedBuild = String(fallbackHint.suggested_build_number || "").trim();
+      const strategy = String(fallbackHint.strategy || "").trim();
+      const reason = String(fallbackHint.reason || "").trim();
+
+      fallbackLine.textContent = `full_compare_fallback=true hinted_chrome_version=${hintedVersion || "(unknown)"} build=${hintedBuild || "(unknown)"} strategy=${strategy || "(unknown)"}${reason ? ` reason=${reason}` : ""}`;
+      card.appendChild(fallbackLine);
+    }
+
     const url = document.createElement("a");
     url.href = component.compare_url || "#";
     url.textContent = component.compare_url || "Compare URL";
@@ -781,6 +798,40 @@ function renderCompare(compare) {
       directorySummary.className = "mono";
       directorySummary.textContent = `directories=${directories.length}`;
       card.appendChild(directorySummary);
+    }
+
+    const excludedFiles = Array.isArray(component.excluded_files) ? component.excluded_files : [];
+    const excludedFilesTruncated = Boolean(component.excluded_files_truncated);
+    if (excludedFileCount > 0) {
+      const excludedDetails = document.createElement("details");
+      const excludedSummary = document.createElement("summary");
+      excludedSummary.textContent = `Excluded files (${excludedFileCount})`;
+      excludedDetails.appendChild(excludedSummary);
+
+      if (excludedFiles.length) {
+        const excludedList = document.createElement("ul");
+        excludedFiles.forEach((item) => {
+          if (!item || typeof item !== "object") {
+            return;
+          }
+          const li = document.createElement("li");
+          const filename = String(item.filename || "").trim() || "(unknown)";
+          const reason = String(item.reason || "").trim();
+          const matched = String(item.matched_keywords || "").trim();
+          li.textContent = `${filename}${reason ? ` [${reason}]` : ""}${matched ? ` keywords=${matched}` : ""}`;
+          excludedList.appendChild(li);
+        });
+        excludedDetails.appendChild(excludedList);
+      }
+
+      if (excludedFilesTruncated) {
+        const truncatedNote = document.createElement("p");
+        truncatedNote.className = "mono";
+        truncatedNote.textContent = "Excluded file preview truncated.";
+        excludedDetails.appendChild(truncatedNote);
+      }
+
+      card.appendChild(excludedDetails);
     }
 
     const files = Array.isArray(component.files) ? component.files : [];

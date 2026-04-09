@@ -7,7 +7,6 @@ from typing import Any
 from docx import Document
 from docx.shared import Pt
 
-
 _DEV_CHURN_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(^|/)build\.(gn|gni)$", flags=re.IGNORECASE),
     re.compile(r"(^|/)(version|versions|lastchange|deps)$", flags=re.IGNORECASE),
@@ -141,7 +140,7 @@ def _add_effective_focus(document: Document, result: dict[str, Any]) -> None:
 def _add_cve_details(document: Document, result: dict[str, Any]) -> None:
     cve_payload = result.get("cve")
     if not isinstance(cve_payload, dict):
-        cve_payload = (result.get("primary_cve") if isinstance(result.get("primary_cve"), dict) else None)
+        cve_payload = result.get("primary_cve") if isinstance(result.get("primary_cve"), dict) else None
 
     if not isinstance(cve_payload, dict):
         cves = (result.get("enrichment", {}) if isinstance(result.get("enrichment"), dict) else {}).get("cves", [])
@@ -308,6 +307,10 @@ def _add_filtered_diff_summary(document: Document, result: dict[str, Any]) -> No
         all_files = [item for item in (component_result.get("files", []) or []) if isinstance(item, dict)]
         security_files = [item for item in all_files if _is_security_relevant_file(item, security_terms)]
         suppressed_count = max(0, len(all_files) - len(security_files))
+        fallback_hint = component_result.get("fallback_version_hint", {}) if isinstance(component_result.get("fallback_version_hint"), dict) else {}
+        fallback_hint_version = str(fallback_hint.get("suggested_chromium_version", "") or "").strip()
+        fallback_hint_build = str(fallback_hint.get("suggested_build_number", "") or "").strip()
+        fallback_hint_strategy = str(fallback_hint.get("strategy", "") or "").strip()
 
         component_rows = [
             ("Status", str(component_result.get("status", ""))),
@@ -318,6 +321,14 @@ def _add_filtered_diff_summary(document: Document, result: dict[str, Any]) -> No
             ("File count (security-relevant)", str(len(security_files))),
             ("Suppressed non-security files", str(suppressed_count)),
             ("Truncated", str((component_result.get("compare_meta") or {}).get("truncated", False))),
+            (
+                "Fallback version/build hint",
+                (
+                    f"{fallback_hint_version} (build {fallback_hint_build}) via {fallback_hint_strategy}"
+                    if bool(fallback_hint.get("applied")) and fallback_hint_version
+                    else "(none)"
+                ),
+            ),
         ]
         _add_key_value_table(document, component_rows)
 
