@@ -18,3 +18,5 @@ cves/**
 !cves/2025/7xxx/**
 # END slowPush managed block
 reports/
+jpg_mpf.hexpat
+.cache/*
